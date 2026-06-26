@@ -1,0 +1,19 @@
+# 素材和输出
+素材1/
+处理结果/
+work/
+debug_data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+
+# 临时文件
+*.video_only.MOV
+*.npy
