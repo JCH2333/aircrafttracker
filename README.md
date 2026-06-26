@@ -20,7 +20,7 @@
 ## 安装
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/aircrafttracker.git
+git clone https://github.com/JCH2333/aircrafttracker.git
 cd aircrafttracker
 pip install -r requirements.txt
 ```
