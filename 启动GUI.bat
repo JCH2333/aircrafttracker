@@ -31,10 +31,17 @@ echo.
 
 :: ---- 2. Dependencies ----
 echo [2/4] Checking dependencies...
+:: Ensure pip is available even if Scripts not on PATH
+python -m pip --version >nul 2>&1
+if errorlevel 1 (
+    echo   pip not available. Run: python -m ensurepip
+    pause
+    exit /b 1
+)
 python -c "import cv2,torch,av,scipy,tqdm,customtkinter" >nul 2>&1
 if errorlevel 1 (
     echo   Installing dependencies... (may take a few minutes)
-    pip install -r "%~dp0requirements.txt" --quiet
+    python -m pip install -r "%~dp0requirements.txt"
     if errorlevel 1 (
         echo   [ERROR] Installation failed. Check your internet connection.
         pause
