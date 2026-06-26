@@ -3,11 +3,11 @@ title Aircraft Tracker
 cd /d "%~dp0"
 
 echo ============================================
-echo   Aircraft Tracker v6 - Setup ^& Launch
+echo   Aircraft Tracker v6 - Setup / Launch
 echo ============================================
 echo.
 
-:: ── 1. Python ──
+:: ---- 1. Python ----
 echo [1/4] Checking Python...
 python --version >nul 2>&1
 if errorlevel 1 (
@@ -29,7 +29,7 @@ if errorlevel 1 (
 python --version 2>&1
 echo.
 
-:: ── 2. Dependencies ──
+:: ---- 2. Dependencies ----
 echo [2/4] Checking dependencies...
 python -c "import cv2,torch,av,scipy,tqdm,customtkinter" >nul 2>&1
 if errorlevel 1 (
@@ -46,7 +46,7 @@ if errorlevel 1 (
 )
 echo.
 
-:: ── 3. AI Model ──
+:: ---- 3. AI Model ----
 echo [3/4] Checking AI model...
 python -c "from stabilize.detection.torchvision_detector import TorchvisionDetector; from stabilize.config import StabilizerConfig; d=TorchvisionDetector(StabilizerConfig()); d.warmup(); print('   Model ready.')" 2>&1
 if errorlevel 1 (
@@ -56,7 +56,7 @@ if errorlevel 1 (
 )
 echo.
 
-:: ── 4. Launch ──
+:: ---- 4. Launch ----
 echo [4/4] Starting GUI...
 start "" python -m stabilize.main --gui
 exit /b 0
