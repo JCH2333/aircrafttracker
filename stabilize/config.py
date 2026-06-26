@@ -45,16 +45,17 @@ class StabilizerConfig:
 
     # Template matching tracker
     template_search_margin: int = 200  # base pixels to search around predicted position
-    template_match_threshold: float = 0.60  # min NCC score to accept match
-    template_redetect_score: float = 0.70   # re-detect if score drops below this
+    template_match_threshold: float = 0.40  # min NCC score to accept match
+    template_redetect_score: float = 0.50   # re-detect if score drops below this
     template_update_alpha: float = 0.3      # blend factor for template update
     template_velocity_alpha: float = 0.5    # EWMA alpha for velocity estimate
     template_max_jump_factor: float = 5.0   # reject match if jump > factor * speed
-    template_quality_score: float = 0.75    # coast (no template/velocity update) below this
+    template_quality_score: float = 0.55    # coast (no template/velocity update) below this
 
     # Edge detection (Canny) for contour-based matching
     canny_low_threshold: int = 30    # Canny low threshold (blended with auto-tune)
     canny_high_threshold: int = 90   # Canny high threshold (blended with auto-tune)
+    edge_blur_sigma: float = 5.0     # Gaussian blur sigma for contour bands
 
     # Encoding
     video_codec: str = "libx264"
