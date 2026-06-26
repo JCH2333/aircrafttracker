@@ -5,6 +5,9 @@
 work/
 debug_data/
 
+# 原始 motionCrop（不再维护，仅保留本地参考）
+motionCrop-v1.1.0-win64/
+
 # Python
 __pycache__/
 *.py[cod]
