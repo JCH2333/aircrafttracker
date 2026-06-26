@@ -88,7 +88,12 @@ class StabilizationPipeline:
             shutil.copy2(str(video_path), str(output_path))
 
     def _run_pass1(self) -> None:
-        """Analysis pass: detect aircraft on every frame, smooth, compute transforms."""
+        """Analysis pass: track aircraft, compute centering transforms.
+
+        Uses FeatureTracker (Shi-Tomasi + Lucas-Kanade optical flow)
+        for smooth sub-pixel frame-to-frame tracking. Detection is
+        used for initialization and periodic drift correction.
+        """
         logger.info("--- Pass 1: Analysis ---")
 
         reader = VideoReader(self.config.input_path, mode="analysis")
@@ -100,40 +105,66 @@ class StabilizationPipeline:
 
         total = reader.total_frames if reader.total_frames > 0 else sys.maxsize
 
-        # Initialize detector (no tracker — detect every frame to avoid jumps)
+        # Initialize detection and optical flow tracker
         detector = TorchvisionDetector(self.config)
         detector.warmup()
         fallback = MotionFallbackDetector(self.config)
 
-        centroids = []
-        detection_ok = 0
-        detection_miss = 0
-        last_bbox = None  # fallback: use last known bbox for centroid
+        from stabilize.stabilization.template_tracker import TemplateTracker
+        tracker = TemplateTracker(self.config)
 
-        pbar = tqdm(reader, total=total, desc="Pass 1 (detect)", unit="f", colour="blue")
+        centroids = []
+        n_detections = 0
+        n_optical_flow = 0
+        n_fallback = 0
+        last_bbox = None
+
+        pbar = tqdm(reader, total=total, desc="Pass 1 (track)", unit="f", colour="blue")
 
         for frame_bgr, idx in pbar:
-            bbox = detector.detect(frame_bgr)
+            centroid = None
 
-            if bbox is None:
-                bbox = fallback.detect(frame_bgr)
+            # Decide: use detection or template matching?
+            need_detect = (
+                not tracker.initialized
+                or tracker.needs_redetection()
+            )
 
-            if bbox is not None:
-                x, y, w, h = bbox
-                centroids.append((x + w / 2.0, y + h / 2.0))
-                last_bbox = bbox
-                detection_ok += 1
-                pbar.set_postfix_str(f"ok={detection_ok} miss={detection_miss}")
-            elif last_bbox is not None:
-                # Detection lost: reuse last known centroid
+            if need_detect:
+                bbox = detector.detect(frame_bgr)
+                if bbox is None:
+                    bbox = fallback.detect(frame_bgr)
+
+                if bbox is not None:
+                    last_bbox = bbox
+                    # Only use detection for first init or fallback recovery.
+                    # Normal operation: template matching self-updates, no
+                    # centroid reset from detection (avoids jumps).
+                    tracker.init_from_detection(frame_bgr, bbox)
+                    centroid = tracker.current_centroid
+                    n_detections += 1
+
+            # If detection wasn't needed or failed, use optical flow
+            if centroid is None and tracker.initialized:
+                centroid = tracker.update(frame_bgr)
+                if centroid is not None:
+                    n_optical_flow += 1
+
+            # Fallback: use last known detection centroid
+            if centroid is None and last_bbox is not None:
                 x, y, w, h = last_bbox
-                centroids.append((x + w / 2.0, y + h / 2.0))
-                detection_miss += 1
-                pbar.set_postfix_str(f"ok={detection_ok} miss={detection_miss}")
-            else:
-                # No detections at all yet — use frame center
-                centroids.append((reader.width / 2.0, reader.height / 2.0))
-                detection_miss += 1
+                centroid = (x + w / 2.0, y + h / 2.0)
+                n_fallback += 1
+
+            # Last resort: frame center
+            if centroid is None:
+                centroid = (reader.width / 2.0, reader.height / 2.0)
+                n_fallback += 1
+
+            centroids.append(centroid)
+            pbar.set_postfix_str(
+                f"det={n_detections} of={n_optical_flow} fb={n_fallback}"
+            )
 
         reader.close()
         pbar.close()
@@ -141,20 +172,27 @@ class StabilizationPipeline:
         self.centroids_raw = centroids
 
         logger.info(
-            "Detection: %d/%d frames (%.1f%% success)",
-            detection_ok, len(centroids),
-            100 * detection_ok / len(centroids) if centroids else 0,
+            "Tracking: %d detection, %d optical flow, %d fallback (%d frames)",
+            n_detections, n_optical_flow, n_fallback, len(centroids),
         )
 
         if not centroids:
             raise RuntimeError("No centroids computed")
 
-        # Direct centering — each frame the aircraft is pinned to center.
-        # No temporal smoothing: the raw detection centroid is used directly.
+        # Direct centering — each frame pinned to center
         self.transforms = compute_transforms(
             centroids,
             reader.width,
             reader.height,
+        )
+
+        # Compute jitter stats (frame-to-frame centroid variation)
+        c_arr = np.array(centroids)
+        dx_frame = np.diff(c_arr[:, 0])
+        dy_frame = np.diff(c_arr[:, 1])
+        logger.info(
+            "Frame-to-frame jitter: dx_std=%.2f, dy_std=%.2f px",
+            float(np.std(dx_frame)), float(np.std(dy_frame)),
         )
 
         dx_arr = np.array([t[0] for t in self.transforms])

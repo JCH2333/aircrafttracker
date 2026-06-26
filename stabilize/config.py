@@ -33,6 +33,22 @@ class StabilizerConfig:
     # Warping
     border_mode: str = "constant"  # "constant" | "reflect" | "replicate"
 
+    # Feature tracking (Lucas-Kanade optical flow)
+    feature_max_corners: int = 100     # Shi-Tomasi max corners
+    feature_quality: float = 0.01      # qualityLevel threshold
+    feature_min_distance: int = 10     # min pixel distance between corners
+    feature_redetect_min_points: int = 15  # re-detect below this count
+    lk_win_size: tuple[int, int] = (21, 21)  # optical flow search window
+    lk_max_iter: int = 30              # optical flow max iterations
+    lk_epsilon: float = 0.01           # optical flow convergence threshold
+    feature_bbox_margin: float = 0.10  # fraction of bbox to exclude from edges
+
+    # Template matching tracker
+    template_search_margin: int = 200  # pixels to search around last position
+    template_match_threshold: float = 0.85  # min NCC score to accept match
+    template_redetect_score: float = 0.90   # re-detect if score drops below this
+    template_update_alpha: float = 0.3      # blend factor for template update
+
     # Encoding
     video_codec: str = "libx264"
     crf: int = 18
