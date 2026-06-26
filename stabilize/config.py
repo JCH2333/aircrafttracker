@@ -45,8 +45,8 @@ class StabilizerConfig:
 
     # Template matching tracker
     template_search_margin: int = 200  # pixels to search around last position
-    template_match_threshold: float = 0.85  # min NCC score to accept match
-    template_redetect_score: float = 0.90   # re-detect if score drops below this
+    template_match_threshold: float = 0.60  # min NCC score to accept match
+    template_redetect_score: float = 0.70   # re-detect if score drops below this
     template_update_alpha: float = 0.3      # blend factor for template update
 
     # Encoding
