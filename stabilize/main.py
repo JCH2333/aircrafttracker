@@ -119,23 +119,32 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print video info and exit",
     )
+    run_group.add_argument(
+        "--gui",
+        action="store_true",
+        help="Launch graphical user interface",
+    )
 
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Main entry point.
-
-    Args:
-        argv: Command-line arguments (uses sys.argv if None).
-
-    Returns:
-        Exit code (0 for success).
-    """
+    """Main entry point."""
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    # Logging setup
+    # GUI mode
+    if args.gui:
+        from stabilize.gui import launch_gui
+        launch_gui()
+        return 0
+
+    # Info mode
+    if args.info:
+        print_video_info(args.input)
+        return 0
+
+    # Logging
     level = logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(
         level=level,
@@ -143,16 +152,19 @@ def main(argv: list[str] | None = None) -> int:
         datefmt="%H:%M:%S",
     )
 
-    # Validate input
+    # Batch folder mode
+    if args.input.is_dir():
+        return _process_folder(args)
+
+    # Validate single file
     if not args.input.exists():
         parser.error(f"Input file not found: {args.input}")
 
-    # Info mode
-    if args.info:
-        print_video_info(args.input)
-        return 0
+    # Print summary
+    print_video_info(args.input)
+    print()
 
-    # Build config
+    # Run pipeline
     config = StabilizerConfig(
         input_path=args.input,
         output_path=args.output,
@@ -168,11 +180,6 @@ def main(argv: list[str] | None = None) -> int:
         preview=args.preview,
     )
 
-    # Print summary
-    print_video_info(args.input)
-    print()
-
-    # Run pipeline
     pipeline = StabilizationPipeline(config)
     try:
         output_path = pipeline.run()
@@ -187,6 +194,52 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:
         logging.error("Pipeline failed: %s", e, exc_info=args.debug)
         return 1
+
+
+def _process_folder(args) -> int:
+    """Process all video files in a folder sequentially."""
+    input_dir = Path(args.input)
+    video_exts = {".mov", ".mp4", ".MOV", ".MP4"}
+    videos = sorted(
+        [f for f in input_dir.iterdir() if f.suffix in video_exts and f.is_file()]
+    )
+
+    if not videos:
+        print(f"No video files found in {input_dir}")
+        return 1
+
+    print(f"Found {len(videos)} video(s) in {input_dir}")
+    print("=" * 50)
+
+    for i, path in enumerate(videos, 1):
+        print(f"\n[{i}/{len(videos)}] {path.name} ({path.stat().st_size / 1e6:.0f} MB)")
+
+        config = StabilizerConfig(
+            input_path=path,
+            output_path=args.output,
+            output_dir=args.output_dir,
+            detector_backend=args.detector,
+            detection_confidence=args.conf,
+            detection_interval=args.reinterval,
+            smoother_method=args.smooth_method,
+            smoother_window=args.smooth_window,
+            border_mode=args.border,
+            crf=args.crf,
+            preset=args.preset,
+            preview=args.preview,
+        )
+        pipeline = StabilizationPipeline(config)
+        try:
+            pipeline.run()
+        except KeyboardInterrupt:
+            print("Interrupted.")
+            return 130
+        except Exception as e:
+            logging.error("Failed: %s — %s", path.name, e)
+            continue
+
+    print(f"\nDone. {len(videos)} file(s) processed.")
+    return 0
 
 
 if __name__ == "__main__":

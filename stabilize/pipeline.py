@@ -38,6 +38,22 @@ class StabilizationPipeline:
         self.config = config
         self.transforms: list[tuple[float, float]] = []
         self.centroids_raw: list[tuple[float, float]] = []
+        self._progress_cb: callable | None = None
+
+    def set_progress_callback(self, cb: callable) -> None:
+        """Set a callback for progress updates.
+
+        Args:
+            cb: callable(phase, current, total) where phase is 1 or 2.
+        """
+        self._progress_cb = cb
+
+    def _report_progress(self, phase: int, current: int, total: int) -> None:
+        if self._progress_cb:
+            try:
+                self._progress_cb(phase, current, total)
+            except Exception:
+                pass
 
     def run(self) -> Path:
         """Execute both passes and return the output path."""
@@ -122,6 +138,7 @@ class StabilizationPipeline:
         pbar = tqdm(reader, total=total, desc="Pass 1 (track)", unit="f", colour="blue")
 
         for frame_bgr, idx in pbar:
+            self._report_progress(1, idx + 1, total)
             centroid = None
 
             # Decide: use detection or template matching?
@@ -220,6 +237,7 @@ class StabilizationPipeline:
         )
 
         for (frame_rgb48, idx), (dx, dy) in pbar:
+            self._report_progress(2, idx + 1, total)
             if idx >= len(self.transforms):
                 break
 
