@@ -61,13 +61,6 @@ class StabilizerConfig:
     transition_frames: int = 10       # frames to smooth over when jumping
     transition_threshold: float = 30.0  # min jump distance (px) to trigger transition
 
-    # Weighted grid tracking
-    grid_rows: int = 3
-    grid_cols: int = 2
-    grid_weights: tuple = (2.0, 2.0, 1.0, 1.0, 0.5, 0.5)
-    pole_variance_threshold: float = 3.0
-    template_update_interval: int = 3
-
     # Encoding
     video_codec: str = "libx264"
     crf: int = 18
