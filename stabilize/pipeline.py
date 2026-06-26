@@ -98,6 +98,11 @@ class StabilizationPipeline:
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True)
             logger.info("Audio muxed successfully")
+        except FileNotFoundError:
+            logger.warning("FFmpeg not found - output will have no audio.")
+            logger.info("Install FFmpeg: https://ffmpeg.org/download.html")
+            import shutil
+            shutil.copy2(str(video_path), str(output_path))
         except subprocess.CalledProcessError as e:
             logger.warning("FFmpeg audio mux failed: %s", e.stderr)
             import shutil
