@@ -53,8 +53,33 @@ if errorlevel 1 (
 )
 echo.
 
-:: ---- 3. AI Model ----
-echo [3/4] Checking AI model...
+:: ---- 3. FFmpeg ----
+echo [3/5] Checking FFmpeg...
+ffmpeg -version >nul 2>&1
+if errorlevel 1 (
+    echo   FFmpeg not found. Installing via winget...
+    winget install Gyan.FFmpeg --accept-source-agreements --accept-package-agreements 2>&1
+    if errorlevel 1 (
+        echo   winget install failed. Downloading portable FFmpeg...
+        powershell -Command "Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile '%TEMP%\ffmpeg.zip'" 2>&1
+        if errorlevel 1 (
+            echo   [WARN] FFmpeg download failed. Output will have no audio.
+            echo   Install manually: https://ffmpeg.org/download.html
+        ) else (
+            powershell -Command "Expand-Archive -Path '%TEMP%\ffmpeg.zip' -DestinationPath '%~dp0ffmpeg' -Force" 2>&1
+            set "PATH=%~dp0ffmpeg\ffmpeg-release-essentials\bin;%PATH%"
+            echo   FFmpeg installed to project folder.
+        )
+    ) else (
+        echo   FFmpeg installed via winget.
+    )
+) else (
+    echo   FFmpeg found.
+)
+echo.
+
+:: ---- 4. AI Model ----
+echo [4/5] Checking AI model...
 python -c "from stabilize.detection.torchvision_detector import TorchvisionDetector; from stabilize.config import StabilizerConfig; d=TorchvisionDetector(StabilizerConfig()); d.warmup(); print('   Model ready.')" 2>&1
 if errorlevel 1 (
     echo   [ERROR] Model download failed. Check your internet connection.
@@ -63,7 +88,7 @@ if errorlevel 1 (
 )
 echo.
 
-:: ---- 4. Launch ----
-echo [4/4] Starting GUI...
+:: ---- 5. Launch ----
+echo [5/5] Starting GUI...
 start "" python -m stabilize.main --gui
 exit /b 0
