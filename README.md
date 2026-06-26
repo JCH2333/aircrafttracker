@@ -27,6 +27,12 @@ pip install -r requirements.txt
 
 ## 使用方法
 
+### 🖱️ 双击启动（推荐）
+
+1. 确保已安装 Python 3.12+ 和依赖（`pip install -r requirements.txt`）
+2. 双击 `启动GUI.bat`
+3. 脚本会自动检查环境，然后打开图形界面
+
 ### GUI 模式
 
 ```bash

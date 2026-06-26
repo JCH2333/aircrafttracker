@@ -1,34 +1,43 @@
 @echo off
-chcp 65001 >nul
 title Aircraft Tracker
+cd /d "%~dp0"
+
+echo ========================================
+echo   Aircraft Tracker - Launching GUI
+echo ========================================
+echo.
 
 :: Check Python
 python --version >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [错误] 未找到 Python，请先安装 Python 3.12+
-    echo 下载地址: https://www.python.org/downloads/
+if errorlevel 1 (
+    echo [ERROR] Python not found.
+    echo Please install Python 3.12+ from https://www.python.org/downloads/
+    echo.
     pause
     exit /b 1
 )
+echo [OK] Python found.
 
 :: Check dependencies
-python -c "import cv2, torch, av, scipy, tqdm" >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [提示] 缺少依赖，正在安装...
-    pip install -r requirements.txt
-    if %errorlevel% neq 0 (
-        echo [错误] 依赖安装失败，请检查网络连接
+python -c "import cv2,torch,av,scipy,tqdm" >nul 2>&1
+if errorlevel 1 (
+    echo [INFO] Installing dependencies...
+    pip install -r "%~dp0requirements.txt"
+    if errorlevel 1 (
+        echo [ERROR] Dependency install failed. Check network.
         pause
         exit /b 1
     )
 )
+echo [OK] Dependencies ready.
 
-:: Launch GUI
-cd /d "%~dp0"
+:: Launch
+echo [INFO] Starting GUI...
+echo.
 python -m stabilize.main --gui
 
-if %errorlevel% neq 0 (
+if errorlevel 1 (
     echo.
-    echo [提示] 程序异常退出，请检查上方错误信息
-    pause
+    echo [ERROR] Application exited with error code %errorlevel%
 )
+pause
