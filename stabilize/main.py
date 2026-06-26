@@ -28,7 +28,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "input",
         type=Path,
-        help="Path to input .MOV file",
+        nargs="?",
+        default=None,
+        help="Path to input .MOV file (optional when using --gui or --info)",
     )
 
     parser.add_argument(
@@ -139,10 +141,16 @@ def main(argv: list[str] | None = None) -> int:
         launch_gui()
         return 0
 
-    # Info mode
+    # Info mode (needs input)
     if args.info:
+        if not args.input:
+            parser.error("--info requires an input file")
         print_video_info(args.input)
         return 0
+
+    # All other modes need input
+    if not args.input:
+        parser.error("the following arguments are required: input")
 
     # Logging
     level = logging.DEBUG if args.debug else logging.INFO
