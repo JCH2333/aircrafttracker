@@ -21,7 +21,6 @@ from stabilize.detection.motion_fallback import MotionFallbackDetector
 from stabilize.detection.torchvision_detector import TorchvisionDetector
 from stabilize.io.reader import VideoReader
 from stabilize.io.writer import VideoWriter
-from stabilize.stabilization.smoother import smooth_trajectory
 from stabilize.stabilization.warper import compute_transforms, translate_frame
 
 logger = logging.getLogger(__name__)
@@ -150,18 +149,10 @@ class StabilizationPipeline:
         if not centroids:
             raise RuntimeError("No centroids computed")
 
-        # Smooth trajectory
-        logger.info("Smoothing trajectory...")
-        centroids_smooth = smooth_trajectory(
-            centroids,
-            window=self.config.smoother_window,
-            method=self.config.smoother_method,
-            polyorder=self.config.smoother_polyorder,
-        )
-
-        # Compute transforms to center the aircraft
+        # Direct centering — each frame the aircraft is pinned to center.
+        # No temporal smoothing: the raw detection centroid is used directly.
         self.transforms = compute_transforms(
-            centroids_smooth,
+            centroids,
             reader.width,
             reader.height,
         )
