@@ -1,11 +1,13 @@
-"""NCC template-matching aircraft tracker with velocity-constrained search.
+"""Template-matching aircraft tracker with boundary-aware cropping.
 
-Tracks the aircraft by matching a template against a search region
-in each new frame. Search region is centered on the *predicted* position
-(based on recent velocity), preventing the matcher from jumping to
-foreground objects when the aircraft is blurred or occluded.
+Uses NCC grayscale template matching with velocity-constrained search,
+quality-gated coasting, and adaptive cropping when the aircraft
+partially exits the frame.
 
-Detection is used only for initialization and fallback recovery.
+When the template extends beyond the frame boundary, the visible
+portion is cropped and matched independently. The centroid offset
+is adjusted to account for the cropped region, allowing the tracker
+to follow just the nose/cockpit when the tail is out of frame.
 """
 
 import logging
@@ -19,19 +21,12 @@ logger = logging.getLogger(__name__)
 
 
 class TemplateTracker:
-    """Velocity-constrained NCC template matching tracker.
-
-    Maintains a velocity estimate (EWMA of frame-to-frame displacement)
-    to predict the aircraft position and constrain the search region.
-    This prevents foreground contamination when the aircraft is blurred
-    or partially occluded — the matcher can't jump to objects far from
-    the physically-expected position.
-    """
+    """NCC template matcher with velocity prediction and boundary cropping."""
 
     def __init__(self, config: StabilizerConfig):
         self.config = config
-        self.template: np.ndarray | None = None
-        self.template_bbox: tuple[int, int, int, int] | None = None
+        self.template: np.ndarray | None = None       # grayscale aircraft patch
+        self.template_bbox: tuple[int, int, int, int] | None = None  # full bbox in frame coords
         self.current_centroid: tuple[float, float] | None = None
         self.last_match_score: float = 0.0
         self.frames_since_detect: int = 0
@@ -39,11 +34,14 @@ class TemplateTracker:
         # Velocity tracking (EWMA)
         self._vx: float = 0.0
         self._vy: float = 0.0
+
+        # Config shortcuts
         self._velocity_alpha: float = config.template_velocity_alpha
         self._base_margin: int = config.template_search_margin
         self._match_threshold: float = config.template_match_threshold
         self._update_alpha: float = config.template_update_alpha
         self._max_jump_factor: float = config.template_max_jump_factor
+        self._quality_score: float = config.template_quality_score
 
     # ── public API ──────────────────────────────────────────────
 
@@ -57,7 +55,6 @@ class TemplateTracker:
 
     @property
     def velocity(self) -> tuple[float, float]:
-        """Current estimated velocity (px/frame)."""
         return (self._vx, self._vy)
 
     def init_from_detection(
@@ -81,89 +78,114 @@ class TemplateTracker:
         )
 
     def update(self, frame_bgr: np.ndarray) -> tuple[float, float] | None:
-        """Track aircraft with velocity-constrained template matching.
+        """Track aircraft with boundary-aware template matching.
 
-        1. Predict position from velocity
-        2. Search around predicted position (adaptive margin)
-        3. Reject matches that jump too far from prediction
+        When the template extends beyond the frame edge, the visible
+        portion is cropped and matched. The centroid is adjusted to
+        compensate for the cropping offset.
         """
         if self.template is None or self.template_bbox is None:
             return None
 
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        fh, fw = gray.shape
         _, _, tw, th = self.template_bbox
 
-        # Predict next position from current position + velocity
+        # ── Predict position ──
         cx_pred = self.current_centroid[0] + self._vx
         cy_pred = self.current_centroid[1] + self._vy
 
-        # Adaptive search margin: at least base_margin, at most 3x base_margin
+        # ── Adaptive search margin ──
         speed = np.sqrt(self._vx ** 2 + self._vy ** 2)
         margin = int(np.clip(
             max(self._base_margin, speed * 3.0),
-            self._base_margin,
-            self._base_margin * 3,
+            self._base_margin, self._base_margin * 3,
         ))
 
-        # Search region centered on predicted position.
-        # Must be at least as large as the template.
-        tx_pred = int(cx_pred - tw / 2.0)
-        ty_pred = int(cy_pred - th / 2.0)
-        sx = max(0, tx_pred - margin)
-        sy = max(0, ty_pred - margin)
-        ex = min(gray.shape[1], tx_pred + tw + margin)
-        ey = min(gray.shape[0], ty_pred + th + margin)
+        # ── Check for boundary clipping ──
+        tx_full = int(cx_pred - tw / 2.0)
+        ty_full = int(cy_pred - th / 2.0)
 
-        # Ensure search region is large enough for the template
-        if (ex - sx < tw) or (ey - sy < th):
-            # Expand to fit template, or fall back to full-frame search
-            sx = max(0, min(sx, gray.shape[1] - tw))
-            sy = max(0, min(sy, gray.shape[0] - th))
-            ex = min(gray.shape[1], sx + tw)
-            ey = min(gray.shape[0], sy + th)
-            if (ex - sx < tw) or (ey - sy < th):
-                return None  # can't fit template anywhere
+        # Template region in frame coordinates
+        t_x1 = max(0, tx_full)
+        t_y1 = max(0, ty_full)
+        t_x2 = min(fw, tx_full + tw)
+        t_y2 = min(fh, ty_full + th)
 
+        # Visible portion of template
+        crop_x1 = t_x1 - tx_full  # offset into template
+        crop_y1 = t_y1 - ty_full
+        crop_x2 = tw - (tx_full + tw - t_x2)
+        crop_y2 = th - (ty_full + th - t_y2)
+
+        crop_w = crop_x2 - crop_x1
+        crop_h = crop_y2 - crop_y1
+
+        if crop_w < 10 or crop_h < 10:
+            return None  # too little visible
+
+        # Crop template to visible portion
+        if crop_w < tw or crop_h < th:
+            vis_template = self.template[crop_y1:crop_y2, crop_x1:crop_x2]
+            # Centroid of the VISIBLE portion relative to full template center
+            vis_cx_offset = (crop_x1 + crop_x2) / 2.0 - tw / 2.0
+            vis_cy_offset = (crop_y1 + crop_y2) / 2.0 - th / 2.0
+        else:
+            vis_template = self.template
+            vis_cx_offset = 0.0
+            vis_cy_offset = 0.0
+
+        # ── Search region ──
+        sx = max(0, t_x1 - margin)
+        sy = max(0, t_y1 - margin)
+        ex = min(fw, t_x2 + margin)
+        ey = min(fh, t_y2 + margin)
+
+        # Ensure search region is at least template-sized
+        if (ex - sx < crop_w) or (ey - sy < crop_h):
+            sx = max(0, min(sx, fw - crop_w))
+            sy = max(0, min(sy, fh - crop_h))
+            ex = min(fw, sx + crop_w)
+            ey = min(fh, sy + crop_h)
+            if (ex - sx < crop_w) or (ey - sy < crop_h):
+                return None
+
+        # ── Template matching ──
         search = gray[sy:ey, sx:ex]
-
-        # Template matching (search must be >= template in both dimensions)
-        result = cv2.matchTemplate(search, self.template, cv2.TM_CCOEFF_NORMED)
+        result = cv2.matchTemplate(
+            search, vis_template, cv2.TM_CCOEFF_NORMED
+        )
         _, max_val, _, max_loc = cv2.minMaxLoc(result)
         self.last_match_score = float(max_val)
 
         if max_val < self._match_threshold:
-            logger.debug("Template match low: %.4f < %.2f", max_val, self._match_threshold)
+            logger.debug("Match low: %.4f < %.2f", max_val, self._match_threshold)
             return None
 
-        # Match position in full-frame coords
-        matched_tx = sx + max_loc[0]
-        matched_ty = sy + max_loc[1]
-        matched_cx = matched_tx + tw / 2.0
-        matched_cy = matched_ty + th / 2.0
+        # Match position of visible template center
+        matched_vis_cx = sx + max_loc[0] + crop_w / 2.0
+        matched_vis_cy = sy + max_loc[1] + crop_h / 2.0
 
-        # Check for physically impossible jump (foreground contamination)
+        # Convert to full template centroid (accounting for crop offset)
+        matched_cx = matched_vis_cx - vis_cx_offset
+        matched_cy = matched_vis_cy - vis_cy_offset
+
+        # ── Jump detection ──
         jump_dx = matched_cx - cx_pred
         jump_dy = matched_cy - cy_pred
         jump_dist = np.sqrt(jump_dx ** 2 + jump_dy ** 2)
-        max_allowed_jump = max(speed * self._max_jump_factor, self._base_margin * 0.5)
+        max_jump = max(speed * self._max_jump_factor, self._base_margin * 0.5)
 
-        quality_ok = max_val >= self.config.template_quality_score
+        quality_ok = max_val >= self._quality_score
 
-        if jump_dist > max_allowed_jump and self.frames_since_detect > 0:
-            logger.debug(
-                "Jump rejected: %.0fpx > %.0fpx, coasting",
-                jump_dist, max_allowed_jump,
-            )
-            quality_ok = False  # force coasting
+        if jump_dist > max_jump and self.frames_since_detect > 0:
+            logger.debug("Jump rejected: %.0fpx > %.0fpx", jump_dist, max_jump)
+            quality_ok = False
 
         if not quality_ok:
-            # Low-quality match — coast at current velocity, don't update template
             matched_cx = cx_pred
             matched_cy = cy_pred
-            # Velocity unchanged (coasting)
-
         else:
-            # Good match — update velocity from actual displacement
             actual_dx = matched_cx - self.current_centroid[0]
             actual_dy = matched_cy - self.current_centroid[1]
             self._vx = (
@@ -175,29 +197,25 @@ class TemplateTracker:
                 + (1 - self._velocity_alpha) * self._vy
             )
 
-        # Update centroid position
         self.current_centroid = (matched_cx, matched_cy)
 
-        # Update template only on good-quality matches
+        # ── Update template ──
+        tx = int(matched_cx - tw / 2.0)
+        ty = int(matched_cy - th / 2.0)
+        tx = max(0, min(fw - tw, tx))
+        ty = max(0, min(fh - th, ty))
+
         if quality_ok:
-            new_tx = max(0, min(gray.shape[1] - tw, matched_tx))
-            new_ty = max(0, min(gray.shape[0] - th, matched_ty))
-            new_template = gray[new_ty : new_ty + th, new_tx : new_tx + tw]
-            if new_template.shape == self.template.shape:
+            new_patch = gray[ty : ty + th, tx : tx + tw]
+            if new_patch.shape == self.template.shape:
                 self.template = cv2.addWeighted(
                     self.template, 1.0 - self._update_alpha,
-                    new_template, self._update_alpha, 0,
+                    new_patch, self._update_alpha, 0,
                 )
-            self.template_bbox = (new_tx, new_ty, tw, th)
-        else:
-            # Update bbox position for search region (template unchanged)
-            tx = int(matched_cx - tw / 2.0)
-            ty = int(matched_cy - th / 2.0)
-            self.template_bbox = (tx, ty, tw, th)
 
+        self.template_bbox = (tx, ty, tw, th)
         self.frames_since_detect += 1
         return self.current_centroid
 
     def needs_redetection(self) -> bool:
-        """Check if detection recovery is needed."""
         return self.last_match_score < self.config.template_redetect_score

@@ -52,6 +52,10 @@ class StabilizerConfig:
     template_max_jump_factor: float = 5.0   # reject match if jump > factor * speed
     template_quality_score: float = 0.75    # coast (no template/velocity update) below this
 
+    # Edge detection (Canny) for contour-based matching
+    canny_low_threshold: int = 30    # Canny low threshold (blended with auto-tune)
+    canny_high_threshold: int = 90   # Canny high threshold (blended with auto-tune)
+
     # Encoding
     video_codec: str = "libx264"
     crf: int = 18
