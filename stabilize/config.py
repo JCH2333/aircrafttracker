@@ -57,6 +57,10 @@ class StabilizerConfig:
     canny_high_threshold: int = 90   # Canny high threshold (blended with auto-tune)
     edge_blur_sigma: float = 5.0     # Gaussian blur sigma for contour bands
 
+    # Smooth transition on detection re-init
+    transition_frames: int = 10       # frames to smooth over when jumping
+    transition_threshold: float = 30.0  # min jump distance (px) to trigger transition
+
     # Encoding
     video_codec: str = "libx264"
     crf: int = 18

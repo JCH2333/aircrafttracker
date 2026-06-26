@@ -50,6 +50,11 @@ class TemplateTracker:
         self._canny_high: int = config.canny_high_threshold
         self._edge_sigma: float = config.edge_blur_sigma
 
+        # Smooth transition on detection re-init
+        self._transition: dict | None = None  # {start_cx, start_cy, target_cx, target_cy, total, frame}
+        self._transition_frames: int = config.transition_frames
+        self._transition_threshold: float = config.transition_threshold
+
         # Config shortcuts
         self._velocity_alpha: float = config.template_velocity_alpha
         self._base_margin: int = config.template_search_margin
@@ -77,25 +82,65 @@ class TemplateTracker:
         frame_bgr: np.ndarray,
         bbox: tuple[int, int, int, int],
     ) -> None:
-        """Extract contour template from a detection bounding box."""
+        """Extract contour template from a detection bounding box.
+
+        If already tracking and the detection position differs significantly,
+        starts a smooth transition instead of an instant jump.
+        """
         x, y, w, h = bbox
+        target_cx = x + w / 2.0
+        target_cy = y + h / 2.0
+
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         patch = gray[y : y + h, x : x + w]
-        self.template_raw = patch.copy()
-        self.template = self._contour_image(patch)
+        new_template_raw = patch.copy()
+        new_template = self._contour_image(patch)
+
+        # Check if we need a smooth transition
+        if self.current_centroid is not None and self.frames_since_detect > 0:
+            old_cx, old_cy = self.current_centroid
+            jump_dist = np.sqrt(
+                (target_cx - old_cx) ** 2 + (target_cy - old_cy) ** 2
+            )
+            if jump_dist > self._transition_threshold:
+                logger.debug(
+                    "Smooth transition: %.0fpx over %d frames",
+                    jump_dist, self._transition_frames,
+                )
+                self._transition = {
+                    "start_cx": old_cx,
+                    "start_cy": old_cy,
+                    "target_cx": target_cx,
+                    "target_cy": target_cy,
+                    "total": self._transition_frames,
+                    "frame": 0,
+                    "new_template_raw": new_template_raw,
+                    "new_template": new_template,
+                    "new_bbox": (x, y, w, h),
+                }
+                return
+
+        # Direct init (first frame or small jump)
+        self.template_raw = new_template_raw
+        self.template = new_template
         self.template_bbox = (x, y, w, h)
-        self.current_centroid = (x + w / 2.0, y + h / 2.0)
+        self.current_centroid = (target_cx, target_cy)
         self.last_match_score = 1.0
         self.frames_since_detect = 0
         self._vx = 0.0
         self._vy = 0.0
+        self._transition = None
         logger.debug(
             "Template init: %dx%d at (%d,%d), centroid=(%.1f, %.1f)",
-            w, h, x, y, self.current_centroid[0], self.current_centroid[1],
+            w, h, x, y, target_cx, target_cy,
         )
 
     def update(self, frame_bgr: np.ndarray) -> tuple[float, float] | None:
         """Track aircraft via contour-based template matching."""
+        # ── Active transition: skip matching, just interpolate ──
+        if self._transition is not None:
+            return self._update_transition()
+
         if self.template is None or self.template_bbox is None:
             return None
 
@@ -214,7 +259,39 @@ class TemplateTracker:
         self.frames_since_detect += 1
         return self.current_centroid
 
+    def _update_transition(self) -> tuple[float, float]:
+        """Advance smooth transition by one frame. Returns interpolated centroid."""
+        t = self._transition
+        t["frame"] += 1
+        progress = min(1.0, t["frame"] / t["total"])
+        # Ease-out cubic
+        ease = 1.0 - (1.0 - progress) ** 3
+        cx = t["start_cx"] + (t["target_cx"] - t["start_cx"]) * ease
+        cy = t["start_cy"] + (t["target_cy"] - t["start_cy"]) * ease
+
+        if progress >= 1.0:
+            # Finalize: apply detection template
+            nt = self._transition
+            self.template_raw = nt["new_template_raw"]
+            self.template = nt["new_template"]
+            self.template_bbox = nt["new_bbox"]
+            self.current_centroid = (t["target_cx"], t["target_cy"])
+            self._vx = 0.0
+            self._vy = 0.0
+            self.frames_since_detect = 0
+            self.last_match_score = 1.0
+            self._transition = None
+            logger.debug("Transition complete")
+        else:
+            self.current_centroid = (cx, cy)
+            self.frames_since_detect += 1
+
+        return self.current_centroid
+
     def needs_redetection(self) -> bool:
+        # Don't interrupt an active transition
+        if self._transition is not None:
+            return False
         return self.last_match_score < self.config.template_redetect_score
 
     # ── internal ────────────────────────────────────────────────
