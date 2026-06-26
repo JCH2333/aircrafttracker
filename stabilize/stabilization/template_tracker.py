@@ -34,12 +34,18 @@ class TemplateTracker:
 
     def __init__(self, config: StabilizerConfig):
         self.config = config
-        self.template: np.ndarray | None = None       # blurred edge map
-        self.template_raw: np.ndarray | None = None    # source grayscale (for update)
+        self.template: np.ndarray | None = None       # full aircraft contour
+        self.template_raw: np.ndarray | None = None    # full aircraft grayscale
+        self.tail_template: np.ndarray | None = None   # tail region contour (top ~40%)
+        self.tail_template_raw: np.ndarray | None = None
         self.template_bbox: tuple[int, int, int, int] | None = None
         self.current_centroid: tuple[float, float] | None = None
         self.last_match_score: float = 0.0
         self.frames_since_detect: int = 0
+
+        # Tail config
+        self._tail_ratio: float = config.tail_template_ratio
+        self._tail_threshold: float = config.tail_disagreement_threshold
 
         # Velocity tracking (EWMA)
         self._vx: float = 0.0
@@ -96,6 +102,12 @@ class TemplateTracker:
         new_template_raw = patch.copy()
         new_template = self._contour_image(patch)
 
+        # Tail region (upper portion — rigid anchor)
+        tail_h = max(10, int(h * self._tail_ratio))
+        tail_patch = patch[:tail_h, :]
+        new_tail_raw = tail_patch.copy()
+        new_tail = self._contour_image(tail_patch)
+
         # Check if we need a smooth transition
         if self.current_centroid is not None and self.frames_since_detect > 0:
             old_cx, old_cy = self.current_centroid
@@ -108,14 +120,13 @@ class TemplateTracker:
                     jump_dist, self._transition_frames,
                 )
                 self._transition = {
-                    "start_cx": old_cx,
-                    "start_cy": old_cy,
-                    "target_cx": target_cx,
-                    "target_cy": target_cy,
-                    "total": self._transition_frames,
-                    "frame": 0,
+                    "start_cx": old_cx, "start_cy": old_cy,
+                    "target_cx": target_cx, "target_cy": target_cy,
+                    "total": self._transition_frames, "frame": 0,
                     "new_template_raw": new_template_raw,
                     "new_template": new_template,
+                    "new_tail_raw": new_tail_raw,
+                    "new_tail": new_tail,
                     "new_bbox": (x, y, w, h),
                 }
                 return
@@ -123,6 +134,8 @@ class TemplateTracker:
         # Direct init (first frame or small jump)
         self.template_raw = new_template_raw
         self.template = new_template
+        self.tail_template_raw = new_tail_raw
+        self.tail_template = new_tail
         self.template_bbox = (x, y, w, h)
         self.current_centroid = (target_cx, target_cy)
         self.last_match_score = 1.0
@@ -192,31 +205,79 @@ class TemplateTracker:
             if (ex - sx < crop_w) or (ey - sy < crop_h):
                 return None
 
-        # ── Contour-based matching ──
+        # ── Full template matching ──
         search_patch = gray[sy:ey, sx:ex]
         search_contour = self._contour_image(search_patch)
         result = cv2.matchTemplate(
             search_contour, vis_template, cv2.TM_CCOEFF_NORMED
         )
-        _, max_val, _, max_loc = cv2.minMaxLoc(result)
-        self.last_match_score = float(max_val)
+        _, full_score, _, full_loc = cv2.minMaxLoc(result)
+        full_score = float(full_score)
+        full_dx = sx + full_loc[0] + crop_w / 2.0 - vis_cx_offset - self.current_centroid[0]
+        full_dy = sy + full_loc[1] + crop_h / 2.0 - vis_cy_offset - self.current_centroid[1]
 
-        if max_val < self._match_threshold:
-            logger.debug("Contour match low: %.4f < %.2f", max_val, self._match_threshold)
+        # ── Tail template matching ──
+        tail_dx = full_dx
+        tail_dy = full_dy
+        tail_score = 0.0
+        use_tail = False
+
+        if self.tail_template is not None:
+            th_t, tw_t = self.tail_template.shape
+            if crop_h >= th_t:
+                # Tail search region: narrower vertically, centered on upper portion
+                tail_cy_pred = cy_pred - th * 0.3  # tail is above center
+                tsy = max(0, int(tail_cy_pred - th_t / 2.0) - margin)
+                tey = min(fh, int(tail_cy_pred + th_t / 2.0) + margin)
+                tsx, tex = sx, ex  # same horizontal
+                if tey - tsy >= th_t and tex - tsx >= tw_t:
+                    tail_search = gray[tsy:tey, tsx:tex]
+                    tail_contour = self._contour_image(tail_search)
+                    tr = cv2.matchTemplate(tail_contour, self.tail_template, cv2.TM_CCOEFF_NORMED)
+                    _, tail_score, _, tl = cv2.minMaxLoc(tr)
+                    tail_score = float(tail_score)
+                    # Tail centroid displacement
+                    tail_match_cx = tsx + tl[0] + tw_t / 2.0
+                    tail_match_cy = tsy + tl[1] + th_t / 2.0
+                    # Full centroid = tail match + offset (tail center -> full center)
+                    tail_full_cx = tail_match_cx  # tail centered horizontally = aircraft centered
+                    tail_full_cy = tail_match_cy + th * (0.5 - self._tail_ratio / 2.0)
+                    tail_dx = tail_full_cx - self.current_centroid[0]
+                    tail_dy = tail_full_cy - self.current_centroid[1]
+
+        # ── Choose between full and tail ──
+        full_ok = full_score >= self._match_threshold
+        tail_ok = tail_score >= self._match_threshold
+        disagreement = abs(full_dx - tail_dx) + abs(full_dy - tail_dy)
+
+        if full_ok and tail_ok and disagreement < self._tail_threshold:
+            # Normal: full template (more pixels, more stable)
+            self.last_match_score = full_score
+            matched_cx = self.current_centroid[0] + full_dx
+            matched_cy = self.current_centroid[1] + full_dy
+        elif tail_ok and (not full_ok or disagreement >= self._tail_threshold):
+            # Occlusion: tail anchor (rigid, above obstacles)
+            self.last_match_score = tail_score
+            matched_cx = self.current_centroid[0] + tail_dx
+            matched_cy = self.current_centroid[1] + tail_dy
+            use_tail = True
+            logger.debug("Tail anchor: tail=%.3f full=%.3f diff=%.1f", tail_score, full_score, disagreement)
+        elif full_ok:
+            # Only full template valid
+            self.last_match_score = full_score
+            matched_cx = self.current_centroid[0] + full_dx
+            matched_cy = self.current_centroid[1] + full_dy
+        else:
+            # Both bad — return None to trigger fallback
+            logger.debug("Dual match low: full=%.3f tail=%.3f", full_score, tail_score)
             return None
-
-        # ── Position computation ──
-        matched_vis_cx = sx + max_loc[0] + crop_w / 2.0
-        matched_vis_cy = sy + max_loc[1] + crop_h / 2.0
-        matched_cx = matched_vis_cx - vis_cx_offset
-        matched_cy = matched_vis_cy - vis_cy_offset
 
         # ── Jump detection ──
         jump_dx = matched_cx - cx_pred
         jump_dy = matched_cy - cy_pred
         jump_dist = np.sqrt(jump_dx ** 2 + jump_dy ** 2)
         max_jump = max(speed * self._max_jump_factor, self._base_margin * 0.5)
-        quality_ok = max_val >= self._quality_score
+        quality_ok = self.last_match_score >= self._quality_score
 
         if jump_dist > max_jump and self.frames_since_detect > 0:
             logger.debug("Jump rejected: %.0fpx > %.0fpx", jump_dist, max_jump)
@@ -247,13 +308,21 @@ class TemplateTracker:
         if quality_ok:
             new_patch = gray[ty : ty + th, tx : tx + tw]
             if self.template_raw is not None and new_patch.shape == self.template_raw.shape:
-                # Blend raw grayscale
                 self.template_raw = cv2.addWeighted(
                     self.template_raw, 1.0 - self._update_alpha,
                     new_patch, self._update_alpha, 0,
                 )
-                # Recompute contour template from blended grayscale
                 self.template = self._contour_image(self.template_raw)
+            # Also update tail template
+            if self.tail_template_raw is not None:
+                tail_h = max(10, int(th * self._tail_ratio))
+                tail_patch = new_patch[:tail_h, :]
+                if tail_patch.shape == self.tail_template_raw.shape:
+                    self.tail_template_raw = cv2.addWeighted(
+                        self.tail_template_raw, 1.0 - self._update_alpha,
+                        tail_patch, self._update_alpha, 0,
+                    )
+                    self.tail_template = self._contour_image(self.tail_template_raw)
 
         self.template_bbox = (tx, ty, tw, th)
         self.frames_since_detect += 1
@@ -274,6 +343,8 @@ class TemplateTracker:
             nt = self._transition
             self.template_raw = nt["new_template_raw"]
             self.template = nt["new_template"]
+            self.tail_template_raw = nt["new_tail_raw"]
+            self.tail_template = nt["new_tail"]
             self.template_bbox = nt["new_bbox"]
             self.current_centroid = (t["target_cx"], t["target_cy"])
             self._vx = 0.0

@@ -61,6 +61,10 @@ class StabilizerConfig:
     transition_frames: int = 10       # frames to smooth over when jumping
     transition_threshold: float = 30.0  # min jump distance (px) to trigger transition
 
+    # Dual-template: full aircraft + tail anchor
+    tail_template_ratio: float = 0.40     # fraction of template height for tail region
+    tail_disagreement_threshold: float = 15.0  # px diff between full and tail match to trigger tail mode
+
     # Encoding
     video_codec: str = "libx264"
     crf: int = 18
