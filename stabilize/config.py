@@ -44,10 +44,13 @@ class StabilizerConfig:
     feature_bbox_margin: float = 0.10  # fraction of bbox to exclude from edges
 
     # Template matching tracker
-    template_search_margin: int = 200  # pixels to search around last position
+    template_search_margin: int = 200  # base pixels to search around predicted position
     template_match_threshold: float = 0.60  # min NCC score to accept match
     template_redetect_score: float = 0.70   # re-detect if score drops below this
     template_update_alpha: float = 0.3      # blend factor for template update
+    template_velocity_alpha: float = 0.5    # EWMA alpha for velocity estimate
+    template_max_jump_factor: float = 5.0   # reject match if jump > factor * speed
+    template_quality_score: float = 0.75    # coast (no template/velocity update) below this
 
     # Encoding
     video_codec: str = "libx264"
