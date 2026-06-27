@@ -122,16 +122,24 @@ class VideoWriter:
         input_container.close()
 
     def write(self, frame: np.ndarray, frame_index: int) -> None:
-        """Write a single frame to the output.
-
-        Args:
-            frame: uint16 RGB array of shape (H, W, 3), dtype np.uint16.
-            frame_index: Frame index for PTS assignment.
-        """
+        """Write a single frame to the output."""
         av_frame = av.VideoFrame.from_ndarray(frame, format="rgb48le")
         av_frame.pts = frame_index
-        for packet in self.video_stream.encode(av_frame):
-            self.output_container.mux(packet)
+        try:
+            for packet in self.video_stream.encode(av_frame):
+                self.output_container.mux(packet)
+        except Exception as e:
+            if self._frame_count == 0 and "nvenc" in str(self.video_stream.codec_context.name):
+                # NVENC failed on first frame — retry with libx264
+                logger.warning("NVENC open failed: %s — retrying with libx264", e)
+                self.video_stream = self._create_video_stream(
+                    "libx264", self.config, self.reader,
+                    int(self.reader.frame_rate + 0.5),
+                )
+                for packet in self.video_stream.encode(av_frame):
+                    self.output_container.mux(packet)
+            else:
+                raise
         self._frame_count += 1
 
     def write_audio(self) -> None:
