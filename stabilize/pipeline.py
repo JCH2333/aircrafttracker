@@ -9,10 +9,12 @@ Pass 2 (Render): Decode frames at 16-bit precision, apply
 """
 
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 from tqdm import tqdm
 
@@ -118,7 +120,6 @@ class StabilizationPipeline:
         logger.info("--- Pass 1: Analysis ---")
 
         # Use all CPU cores for OpenCV (Sobel, matchTemplate)
-        import os
         cv2.setNumThreads(min(8, os.cpu_count() or 4))
         cv2.setUseOptimized(True)
 
