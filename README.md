@@ -74,7 +74,8 @@ usage: python -m stabilize.main input [-h] [-o OUTPUT] [--output-dir DIR]
   --detector       检测后端 (默认: torchvision)
   --conf           检测置信度阈值 (默认: 0.5)
   --crf            x264 质量, 越小越好 (默认: 18)
-  --preset         编码速度 preset (默认: slow)
+  --preset         编码速度 preset (默认: medium)
+  --codec          编码器: libx264 (CPU) / h264_nvenc (NVIDIA GPU, 默认GUI开启)
   --border         边缘模式 (默认: constant / 黑边)
   --gui            启动图形界面
   --debug          调试模式
@@ -89,9 +90,9 @@ usage: python -m stabilize.main input [-h] [-o OUTPUT] [--output-dir DIR]
 - 无明显运动模糊
 
 已知限制：
-- 严重遮挡（>60%）时会暂时退化到检测模式
+- 严重遮挡（>60%）时可能暂时丢失跟踪
 - 飞机完全出画后需重新检测初始化
-- CPU 版处理速度较慢（6K 视频约 2-4 fps）
+- CPU 编码速度较慢；GUI 默认开启 NVENC 硬件编码（NVIDIA GPU 需支持）
 
 ## 技术栈
 

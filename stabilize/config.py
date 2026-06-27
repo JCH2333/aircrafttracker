@@ -63,7 +63,8 @@ class StabilizerConfig:
 
     # Dual-template: full aircraft + tail anchor
     tail_template_ratio: float = 0.40     # fraction of template height for tail region
-    tail_disagreement_threshold: float = 15.0  # px diff between full and tail match to trigger tail mode
+    tail_disagreement_threshold: float = 15.0
+    match_downscale: float = 0.5  # downscale search region before Sobel (speed)
 
     # Encoding
     video_codec: str = "libx264"

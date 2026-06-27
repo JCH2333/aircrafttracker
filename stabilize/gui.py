@@ -202,7 +202,13 @@ class AircraftTrackerApp(ctk.CTk):
         self._mode_var = ctk.StringVar(value="GPU")
         mode_frame = ctk.CTkFrame(settings, fg_color="transparent")
         mode_frame.grid(row=0, column=1, sticky="w")
-        for i, (label, val) in enumerate([("GPU (CUDA)", "GPU"), ("CPU", "CPU")]):
+        self._nvenc_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(mode_frame, text="NVENC Encode", variable=self._nvenc_var,
+                        fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                        font=ctk.CTkFont(size=12), text_color=FG_PRIMARY).grid(
+                            row=1, column=0, sticky="w", pady=(6, 0))
+
+        for i, (label, val) in enumerate([("GPU", "GPU"), ("CPU", "CPU")]):
             ctk.CTkRadioButton(mode_frame, text=label, variable=self._mode_var, value=val,
                                fg_color=ACCENT, hover_color=ACCENT_HOVER,
                                font=ctk.CTkFont(size=12), text_color=FG_PRIMARY,
@@ -447,11 +453,13 @@ class AircraftTrackerApp(ctk.CTk):
 
             try:
                 device = "cuda" if self._mode_var.get() == "GPU" else "cpu"
+                codec = "h264_nvenc" if self._nvenc_var.get() else "libx264"
                 config = StabilizerConfig(
                     input_path=path,
                     output_path=output_path,
                     output_dir=self._output_dir,
                     device=device,
+                    video_codec=codec,
                 )
                 pipeline = StabilizationPipeline(config)
                 pipeline.set_progress_callback(self._on_pipeline_progress)

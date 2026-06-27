@@ -117,6 +117,11 @@ class StabilizationPipeline:
         """
         logger.info("--- Pass 1: Analysis ---")
 
+        # Use all CPU cores for OpenCV (Sobel, matchTemplate)
+        import os
+        cv2.setNumThreads(min(8, os.cpu_count() or 4))
+        cv2.setUseOptimized(True)
+
         reader = VideoReader(self.config.input_path, mode="analysis")
         logger.info(
             "%d×%d, %.2f fps, ~%d frames",

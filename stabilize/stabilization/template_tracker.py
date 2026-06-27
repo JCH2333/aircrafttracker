@@ -205,13 +205,20 @@ class TemplateTracker:
             if (ex - sx < crop_w) or (ey - sy < crop_h):
                 return None
 
-        # ── Full template matching ──
+        # ── Full template matching (downscale for speed) ──
+        scale = self.config.match_downscale
         search_patch = gray[sy:ey, sx:ex]
-        search_contour = self._contour_image(search_patch)
-        result = cv2.matchTemplate(
-            search_contour, vis_template, cv2.TM_CCOEFF_NORMED
-        )
-        _, full_score, _, full_loc = cv2.minMaxLoc(result)
+        if scale < 1.0:
+            small_search = cv2.resize(search_patch, None, fx=scale, fy=scale)
+            small_tmpl = cv2.resize(vis_template, None, fx=scale, fy=scale)
+            sc = self._contour_image(small_search)
+            result = cv2.matchTemplate(sc, small_tmpl, cv2.TM_CCOEFF_NORMED)
+            _, full_score, _, full_loc = cv2.minMaxLoc(result)
+            full_loc = (int(full_loc[0] / scale), int(full_loc[1] / scale))
+        else:
+            sc = self._contour_image(search_patch)
+            result = cv2.matchTemplate(sc, vis_template, cv2.TM_CCOEFF_NORMED)
+            _, full_score, _, full_loc = cv2.minMaxLoc(result)
         full_score = float(full_score)
         full_dx = sx + full_loc[0] + crop_w / 2.0 - vis_cx_offset - self.current_centroid[0]
         full_dy = sy + full_loc[1] + crop_h / 2.0 - vis_cy_offset - self.current_centroid[1]
@@ -232,9 +239,18 @@ class TemplateTracker:
                 tsx, tex = sx, ex  # same horizontal
                 if tey - tsy >= th_t and tex - tsx >= tw_t:
                     tail_search = gray[tsy:tey, tsx:tex]
-                    tail_contour = self._contour_image(tail_search)
-                    tr = cv2.matchTemplate(tail_contour, self.tail_template, cv2.TM_CCOEFF_NORMED)
-                    _, tail_score, _, tl = cv2.minMaxLoc(tr)
+                    scale = self.config.match_downscale
+                    if scale < 1.0:
+                        ts_small = cv2.resize(tail_search, None, fx=scale, fy=scale)
+                        tt_small = cv2.resize(self.tail_template, None, fx=scale, fy=scale)
+                        tc = self._contour_image(ts_small)
+                        tr = cv2.matchTemplate(tc, tt_small, cv2.TM_CCOEFF_NORMED)
+                        _, tail_score, _, tloc = cv2.minMaxLoc(tr)
+                        tl = (int(tloc[0] / scale), int(tloc[1] / scale))
+                    else:
+                        tc = self._contour_image(tail_search)
+                        tr = cv2.matchTemplate(tc, self.tail_template, cv2.TM_CCOEFF_NORMED)
+                        _, tail_score, _, tl = cv2.minMaxLoc(tr)
                     tail_score = float(tail_score)
                     # Tail centroid displacement
                     tail_match_cx = tsx + tl[0] + tw_t / 2.0
