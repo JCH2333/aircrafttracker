@@ -35,26 +35,7 @@ class VideoWriter:
         # Video stream
         rate = reader.stream.average_rate
         codec = self._detect_codec(config.video_codec)
-        logger.info("Video codec: %s", codec)
-        self.video_stream = self.output_container.add_stream(
-            codec, rate=rate
-        )
-        self.video_stream.width = reader.width
-        self.video_stream.height = reader.height
-        self.video_stream.pix_fmt = "yuv422p10le"
-
-        if "nvenc" in codec:
-            self.video_stream.options = {
-                "preset": "p4",  # p1(slowest)-p7(fastest), p4 = medium
-                "qp": str(config.crf - 3),  # NVENC uses QP instead of CRF, lower=better
-                "rc": "constqp",
-            }
-        else:
-            self.video_stream.options = {
-                "preset": config.preset,
-                "crf": str(config.crf),
-                "x264-params": "colorprim=bt709:transfer=bt709:colormatrix=bt709",
-            }
+        self.video_stream = self._create_video_stream(codec, config, reader, rate)
 
         # Audio pass-through
         self.audio_streams = []
@@ -62,6 +43,31 @@ class VideoWriter:
             self._setup_audio_pass_through()
 
         self._frame_count = 0
+
+    def _create_video_stream(self, codec, config, reader, rate):
+        """Create video stream with NVENC fallback."""
+        try:
+            stream = self.output_container.add_stream(codec, rate=rate)
+            stream.width = reader.width
+            stream.height = reader.height
+
+            if "nvenc" in codec:
+                stream.pix_fmt = "p010le"
+                stream.options = {
+                    "preset": "p4", "qp": str(max(1, config.crf - 3)), "rc": "constqp",
+                }
+            else:
+                stream.pix_fmt = "yuv422p10le"
+                stream.options = {
+                    "preset": config.preset, "crf": str(config.crf),
+                    "x264-params": "colorprim=bt709:transfer=bt709:colormatrix=bt709",
+                }
+            return stream
+        except Exception as e:
+            if "nvenc" in codec:
+                logger.warning("NVENC failed: %s — falling back to libx264", e)
+                return self._create_video_stream("libx264", config, reader, rate)
+            raise
 
     @staticmethod
     def _detect_codec(requested: str) -> str:
