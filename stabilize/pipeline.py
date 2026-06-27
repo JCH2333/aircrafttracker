@@ -132,7 +132,9 @@ class StabilizationPipeline:
         fallback = MotionFallbackDetector(self.config)
 
         from stabilize.stabilization.template_tracker import TemplateTracker
+        from stabilize.stabilization.camera_motion import CameraMotionEstimator
         tracker = TemplateTracker(self.config)
+        cam_estimator = CameraMotionEstimator(self.config)
 
         centroids = []
         n_detections = 0
@@ -168,7 +170,11 @@ class StabilizationPipeline:
 
             # If detection wasn't needed or failed, use optical flow
             if centroid is None and tracker.initialized:
-                centroid = tracker.update(frame_bgr)
+                # Get camera motion estimate for fusion
+                cam_motion = cam_estimator.estimate(frame_bgr, last_bbox)
+                cam_dx = cam_motion[0] if cam_motion else 0.0
+                cam_dy = cam_motion[1] if cam_motion else 0.0
+                centroid = tracker.update(frame_bgr, cam_dx, cam_dy)
                 if centroid is not None:
                     n_optical_flow += 1
 

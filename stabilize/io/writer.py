@@ -32,19 +32,29 @@ class VideoWriter:
         # Output container
         self.output_container = av.open(str(self.output_path), "w")
 
-        # Video stream — use exact input frame rate (as Fraction)
+        # Video stream
         rate = reader.stream.average_rate
+        codec = self._detect_codec(config.video_codec)
+        logger.info("Video codec: %s", codec)
         self.video_stream = self.output_container.add_stream(
-            config.video_codec, rate=rate
+            codec, rate=rate
         )
         self.video_stream.width = reader.width
         self.video_stream.height = reader.height
         self.video_stream.pix_fmt = "yuv422p10le"
-        self.video_stream.options = {
-            "preset": config.preset,
-            "crf": str(config.crf),
-            "x264-params": "colorprim=bt709:transfer=bt709:colormatrix=bt709",
-        }
+
+        if "nvenc" in codec:
+            self.video_stream.options = {
+                "preset": "p4",  # p1(slowest)-p7(fastest), p4 = medium
+                "qp": str(config.crf - 3),  # NVENC uses QP instead of CRF, lower=better
+                "rc": "constqp",
+            }
+        else:
+            self.video_stream.options = {
+                "preset": config.preset,
+                "crf": str(config.crf),
+                "x264-params": "colorprim=bt709:transfer=bt709:colormatrix=bt709",
+            }
 
         # Audio pass-through
         self.audio_streams = []
@@ -52,6 +62,23 @@ class VideoWriter:
             self._setup_audio_pass_through()
 
         self._frame_count = 0
+
+    @staticmethod
+    def _detect_codec(requested: str) -> str:
+        """Auto-detect hardware encoder if available, fallback to software."""
+        if requested in ("h264_nvenc", "hevc_nvenc"):
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["ffmpeg", "-hide_banner", "-encoders"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if requested in result.stdout:
+                    return requested
+            except Exception:
+                pass
+            return "libx264"  # fallback
+        return requested
 
     def _setup_audio_pass_through(self):
         """Create output audio streams matching input audio streams.

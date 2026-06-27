@@ -65,8 +65,15 @@ class StabilizerConfig:
     tail_template_ratio: float = 0.40     # fraction of template height for tail region
     tail_disagreement_threshold: float = 15.0  # px diff between full and tail match to trigger tail mode
 
+    # Camera motion estimation (background feature points)
+    camera_redetect_interval: int = 10  # re-detect background features every N frames
+    camera_fusion_weight: float = 0.5    # blend weight between template (1-w) and camera (w)
+
+    # Pyramid template matching
+    pyramid_scale: float = 0.5  # downscale factor for coarse match level
+
     # Encoding
-    video_codec: str = "libx264"
+    video_codec: str = "libx264"  # use "h264_nvenc" for NVIDIA GPU encoding
     crf: int = 18
     preset: str = "medium"
     copy_audio: bool = True
