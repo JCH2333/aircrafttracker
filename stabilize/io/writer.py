@@ -130,8 +130,8 @@ class VideoWriter:
                 self.output_container.mux(packet)
         except Exception as e:
             if self._frame_count == 0 and "nvenc" in str(self.video_stream.codec_context.name):
-                # NVENC failed on first frame — retry with libx264
-                logger.warning("NVENC open failed: %s — retrying with libx264", e)
+                logger.warning("NVENC failed: %s — switching to libx264", e)
+                self.video_stream.codec_context.close()
                 self.video_stream = self._create_video_stream(
                     "libx264", self.config, self.reader,
                     int(self.reader.frame_rate + 0.5),
