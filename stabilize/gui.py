@@ -202,7 +202,7 @@ class AircraftTrackerApp(ctk.CTk):
         self._mode_var = ctk.StringVar(value="GPU")
         mode_frame = ctk.CTkFrame(settings, fg_color="transparent")
         mode_frame.grid(row=0, column=1, sticky="w")
-        self._nvenc_var = ctk.BooleanVar(value=False)
+        self._nvenc_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(mode_frame, text="NVENC Encode", variable=self._nvenc_var,
                         fg_color=ACCENT, hover_color=ACCENT_HOVER,
                         font=ctk.CTkFont(size=12), text_color=FG_PRIMARY).grid(

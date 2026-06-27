@@ -71,19 +71,20 @@ class VideoWriter:
 
     @staticmethod
     def _detect_codec(requested: str) -> str:
-        """Auto-detect hardware encoder if available, fallback to software."""
+        """Auto-detect hardware encoder; fallback to libx264 if unavailable."""
         if requested in ("h264_nvenc", "hevc_nvenc"):
             try:
-                import subprocess
-                result = subprocess.run(
-                    ["ffmpeg", "-hide_banner", "-encoders"],
-                    capture_output=True, text=True, timeout=10,
-                )
-                if requested in result.stdout:
-                    return requested
+                # Try to actually open the codec (not just list it)
+                import av
+                c = av.CodecContext.create(requested, "w")
+                # Set minimal params needed to probe
+                c.width = 1920; c.height = 1080
+                c.pix_fmt = "yuv420p"
+                c.open()
+                c.close()
+                return requested
             except Exception:
-                pass
-            return "libx264"  # fallback
+                return "libx264"
         return requested
 
     def _setup_audio_pass_through(self):
@@ -125,21 +126,8 @@ class VideoWriter:
         """Write a single frame to the output."""
         av_frame = av.VideoFrame.from_ndarray(frame, format="rgb48le")
         av_frame.pts = frame_index
-        try:
-            for packet in self.video_stream.encode(av_frame):
-                self.output_container.mux(packet)
-        except Exception as e:
-            if self._frame_count == 0 and "nvenc" in str(self.video_stream.codec_context.name):
-                logger.warning("NVENC failed: %s — switching to libx264", e)
-                self.video_stream.codec_context.close()
-                self.video_stream = self._create_video_stream(
-                    "libx264", self.config, self.reader,
-                    int(self.reader.frame_rate + 0.5),
-                )
-                for packet in self.video_stream.encode(av_frame):
-                    self.output_container.mux(packet)
-            else:
-                raise
+        for packet in self.video_stream.encode(av_frame):
+            self.output_container.mux(packet)
         self._frame_count += 1
 
     def write_audio(self) -> None:
