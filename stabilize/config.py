@@ -72,6 +72,11 @@ class StabilizerConfig:
     # Pyramid template matching
     pyramid_scale: float = 0.5  # downscale factor for coarse match level
 
+    # Three-tier stabilization
+    feature_refine_max_corners: int = 50     # feature points for Layer 2 refinement
+    feature_refine_max_delta: float = 5.0    # max pixel correction from feature refine
+    camera_fallback_min_failures: int = 3    # consecutive failures before Layer 3 kicks in
+
     # Encoding
     video_codec: str = "libx264"  # use "h264_nvenc" for NVIDIA GPU encoding
     crf: int = 18

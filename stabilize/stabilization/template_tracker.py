@@ -47,6 +47,20 @@ class TemplateTracker:
         self._tail_ratio: float = config.tail_template_ratio
         self._tail_threshold: float = config.tail_disagreement_threshold
 
+        # Three-tier: consecutive failure counter
+        self._consecutive_failures: int = 0
+        self._camera_fallback_min: int = config.camera_fallback_min_failures
+
+        # Layer 2: feature point refinement
+        self._refine_points: np.ndarray | None = None
+        self._refine_gray: np.ndarray | None = None
+        self._refine_max_corners: int = config.feature_refine_max_corners
+        self._refine_max_delta: float = config.feature_refine_max_delta
+        self._refine_lk = dict(
+            winSize=(15, 15), maxLevel=2,
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 15, 0.01),
+        )
+
         # Velocity tracking (EWMA)
         self._vx: float = 0.0
         self._vy: float = 0.0
@@ -249,32 +263,48 @@ class TemplateTracker:
                     tail_dx = tail_full_cx - self.current_centroid[0]
                     tail_dy = tail_full_cy - self.current_centroid[1]
 
-        # ── Choose between full, tail, and camera motion ──
+        # ── Layer 1: Contour template (primary) ──
         full_ok = full_score >= self._match_threshold
         tail_ok = tail_score >= self._match_threshold
         disagreement = abs(full_dx - tail_dx) + abs(full_dy - tail_dy)
+        contour_ok = False
 
         if full_ok and tail_ok and disagreement < self._tail_threshold:
-            # Normal: full template (+ camera validation)
             self.last_match_score = full_score
             matched_dx, matched_dy = full_dx, full_dy
+            contour_ok = True
         elif tail_ok and (not full_ok or disagreement >= self._tail_threshold):
-            # Occlusion: tail anchor
             self.last_match_score = tail_score
             matched_dx, matched_dy = tail_dx, tail_dy
-            use_tail = True
+            contour_ok = True
             logger.debug("Tail anchor: tail=%.3f full=%.3f diff=%.1f", tail_score, full_score, disagreement)
         elif full_ok:
             self.last_match_score = full_score
             matched_dx, matched_dy = full_dx, full_dy
-        elif abs(camera_dx) + abs(camera_dy) > 0.1:
-            # Template failed but camera motion available — use it
-            self.last_match_score = self.last_match_score * 0.9
-            matched_dx, matched_dy = camera_dx, camera_dy
-            logger.debug("Camera fallback: dx=%.1f dy=%.1f", camera_dx, camera_dy)
+            contour_ok = True
+
+        if contour_ok:
+            self._consecutive_failures = 0
+            # ── Layer 2: Feature point refinement ──
+            tx_est = int(self.current_centroid[0] + matched_dx - tw / 2.0)
+            ty_est = int(self.current_centroid[1] + matched_dy - th / 2.0)
+            refine_dx, refine_dy = self._feature_refine(
+                gray, tx_est, ty_est, tw, th
+            )
+            matched_dx += refine_dx
+            matched_dy += refine_dy
         else:
-            logger.debug("Dual match low: full=%.3f tail=%.3f", full_score, tail_score)
-            return None
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self._camera_fallback_min:
+                # ── Layer 3: Camera motion fallback ──
+                self.last_match_score = self.last_match_score * 0.95
+                matched_dx = camera_dx if abs(camera_dx) > 0.1 else self._vx
+                matched_dy = camera_dy if abs(camera_dy) > 0.1 else self._vy
+                logger.debug("Camera fallback (fail#%d): dx=%.1f dy=%.1f",
+                             self._consecutive_failures, matched_dx, matched_dy)
+            else:
+                # Temporary: coast with velocity
+                matched_dx, matched_dy = self._vx, self._vy
 
         matched_cx = self.current_centroid[0] + matched_dx
         matched_cy = self.current_centroid[1] + matched_dy
@@ -403,6 +433,62 @@ class TemplateTracker:
         full_dx = sx + full_loc[0] + crop_w / 2.0 - vis_cx_off - self.current_centroid[0]
         full_dy = sy + full_loc[1] + crop_h / 2.0 - vis_cx_off - self.current_centroid[1]
         return full_dx, full_dy, float(full_score)
+
+    def _feature_refine(
+        self, gray: np.ndarray, tx: int, ty: int, tw: int, th: int
+    ) -> tuple[float, float]:
+        """Layer 2: refine position via feature points on the aircraft surface.
+
+        Detects Shi-Tomasi corners within the template region and tracks
+        them with Lucas-Kanade optical flow. Returns a sub-pixel correction
+        clamped to ±max_delta.
+        """
+        refine_dx, refine_dy = 0.0, 0.0
+
+        # Detect features on aircraft surface
+        if self._refine_points is None or len(self._refine_points) < 8:
+            mask = np.zeros_like(gray)
+            y1 = max(0, ty); y2 = min(gray.shape[0], ty + th)
+            x1 = max(0, tx); x2 = min(gray.shape[1], tx + tw)
+            mask[y1:y2, x1:x2] = 255
+            pts = cv2.goodFeaturesToTrack(
+                gray, mask=mask,
+                maxCorners=self._refine_max_corners,
+                qualityLevel=0.01, minDistance=10, blockSize=7,
+            )
+            if pts is not None and len(pts) >= 4:
+                self._refine_points = pts
+                self._refine_gray = gray
+            return refine_dx, refine_dy
+
+        # Optical flow tracking
+        if self._refine_gray is None:
+            self._refine_gray = gray
+            return refine_dx, refine_dy
+
+        new_pts, status, _ = cv2.calcOpticalFlowPyrLK(
+            self._refine_gray, gray, self._refine_points, None, **self._refine_lk
+        )
+        if new_pts is None:
+            return refine_dx, refine_dy
+
+        status = status.ravel()
+        ok_old = self._refine_points[status == 1]
+        ok_new = new_pts[status == 1]
+
+        if len(ok_new) >= 4:
+            deltas = ok_new - ok_old
+            dx = float(np.median(deltas[:, 0, 0]))
+            dy = float(np.median(deltas[:, 0, 1]))
+            # Clamp to max delta
+            refine_dx = np.clip(dx, -self._refine_max_delta, self._refine_max_delta)
+            refine_dy = np.clip(dy, -self._refine_max_delta, self._refine_max_delta)
+            self._refine_points = ok_new.reshape(-1, 1, 2)
+        else:
+            self._refine_points = None  # trigger re-detection next frame
+
+        self._refine_gray = gray
+        return refine_dx, refine_dy
 
     def needs_redetection(self) -> bool:
         # Don't interrupt an active transition
