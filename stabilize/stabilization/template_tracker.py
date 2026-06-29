@@ -284,9 +284,11 @@ class TemplateTracker:
             matched_cx = self.current_centroid[0] + full_dx
             matched_cy = self.current_centroid[1] + full_dy
         else:
-            # Both bad — return None to trigger fallback
-            logger.debug("Dual match low: full=%.3f tail=%.3f", full_score, tail_score)
-            return None
+            # Both bad — coast with velocity prediction (don't return None)
+            logger.debug("Coasting: full=%.3f tail=%.3f vel=(%.1f,%.1f)",
+                         full_score, tail_score, self._vx, self._vy)
+            matched_cx = self.current_centroid[0] + self._vx
+            matched_cy = self.current_centroid[1] + self._vy
 
         # ── Jump detection ──
         jump_dx = matched_cx - cx_pred
