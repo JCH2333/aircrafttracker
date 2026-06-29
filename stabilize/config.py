@@ -77,6 +77,10 @@ class StabilizerConfig:
     preview: bool = False  # show preview window during analysis pass
     analysis_downscale: int = 1280  # max dimension for detection inference
 
+    # Debug
+    debug_viz: bool = False
+    debug_viz_dir: str = "debug_frames"
+
     def resolve_output_path(self) -> Path:
         """Resolve the output path from input_path and output_dir."""
         input_p = Path(self.input_path)

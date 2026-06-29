@@ -24,6 +24,7 @@ from stabilize.detection.torchvision_detector import TorchvisionDetector
 from stabilize.io.reader import VideoReader
 from stabilize.io.writer import VideoWriter
 from stabilize.stabilization.warper import compute_transforms, translate_frame
+from stabilize.debug_viz import DebugVizWriter
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,12 @@ class StabilizationPipeline:
         from stabilize.stabilization.template_tracker import TemplateTracker
         tracker = TemplateTracker(self.config)
 
+        # Debug visualization
+        debug_viz = None
+        if self.config.debug_viz:
+            from pathlib import Path
+            debug_viz = DebugVizWriter(Path(self.config.debug_viz_dir))
+
         centroids = []
         n_detections = 0
         n_optical_flow = 0
@@ -190,6 +197,27 @@ class StabilizationPipeline:
                 n_fallback += 1
 
             centroids.append(centroid)
+
+            # Debug visualization
+            if debug_viz is not None:
+                state = {
+                    "bbox": last_bbox,
+                    "tail_bbox": (
+                        last_bbox[0], last_bbox[1],
+                        last_bbox[2], int(last_bbox[3] * tracker._tail_ratio),
+                    ) if last_bbox else None,
+                    "centroid": centroid,
+                    "pred_centroid": (
+                        centroid[0] + tracker._vx if tracker._vx else centroid[0],
+                        centroid[1] + tracker._vy if tracker._vy else centroid[1],
+                    ),
+                    "match_score": tracker.last_match_score,
+                    "match_source": "detect" if need_detect else "track",
+                    "velocity": (tracker._vx, tracker._vy),
+                    "detection_used": need_detect and bbox is not None,
+                }
+                debug_viz.write(frame_bgr, idx, state)
+
             pbar.set_postfix_str(
                 f"det={n_detections} of={n_optical_flow} fb={n_fallback}"
             )

@@ -122,6 +122,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print video info and exit",
     )
     run_group.add_argument(
+        "--debug-viz",
+        action="store_true",
+        help="Save debug visualization frames (PNG sequence with tracking overlay)",
+    )
+    run_group.add_argument(
         "--gui",
         action="store_true",
         help="Launch graphical user interface",
@@ -186,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
         crf=args.crf,
         preset=args.preset,
         preview=args.preview,
+        debug_viz=args.debug_viz,
     )
 
     pipeline = StabilizationPipeline(config)
