@@ -76,6 +76,9 @@ class TemplateTracker:
         self._update_alpha: float = config.template_update_alpha
         self._max_jump_factor: float = config.template_max_jump_factor
         self._quality_score: float = config.template_quality_score
+        self._use_edge_matching: bool = config.use_edge_matching
+        self._density_suppress: bool = config.edge_density_suppress
+        self._density_beta: float = config.edge_density_beta
 
     # ── public API ──────────────────────────────────────────────
 
@@ -246,11 +249,14 @@ class TemplateTracker:
             if (ex - sx < crop_w) or (ey - sy < crop_h):
                 return None
 
-        # ── Full template matching (orientation channels) ──
+        # ── Full template matching ──
         scale = self.config.match_downscale
         search_patch = gray[sy:ey, sx:ex]
 
-        if self.template_channels:
+        # Choose matching method: orientation channels (experimental) or magnitude NCC
+        use_orient = self._use_edge_matching and self.template_channels
+
+        if use_orient:
             # Orientation-aware multi-channel matching
             n_bins = len(self.template_channels)
             if scale < 1.0:
@@ -275,7 +281,7 @@ class TemplateTracker:
                     ch[sc_y1:sc_y2, sc_x1:sc_x2] for ch in tmpl_channels
                 ]
 
-            # Multi-channel NCC: match each orientation channel independently
+            # Multi-channel NCC
             result = None
             for i in range(n_bins):
                 ch_result = cv2.matchTemplate(
@@ -287,28 +293,33 @@ class TemplateTracker:
                 else:
                     result += ch_result * w
 
-            _, full_score, _, full_loc = cv2.minMaxLoc(result)
-            full_score = float(full_score)
-            if scale < 1.0:
-                full_loc = (int(full_loc[0] / scale), int(full_loc[1] / scale))
-
-            # Store for ambiguity check
-            small_search = cv2.resize(search_patch, None, fx=scale, fy=scale) if scale < 1.0 else search_patch
+            # Edge density suppression (on combined response)
+            if self._density_suppress:
+                ref_img = search_channels[0] if scale < 1.0 else search_channels[0]
+                result = self._suppress_high_density(result, ref_img)
         else:
-            # Fallback: legacy magnitude-only matching
+            # Magnitude-based NCC (default, proven)
             if scale < 1.0:
                 small_search = cv2.resize(search_patch, None, fx=scale, fy=scale)
                 small_tmpl = cv2.resize(vis_template, None, fx=scale, fy=scale)
                 sc = self._contour_image(small_search)
                 result = cv2.matchTemplate(sc, small_tmpl, cv2.TM_CCOEFF_NORMED)
-                _, full_score, _, full_loc = cv2.minMaxLoc(result)
-                full_loc = (int(full_loc[0] / scale), int(full_loc[1] / scale))
+                # Edge density suppression
+                if self._density_suppress:
+                    result = self._suppress_high_density(result, sc)
             else:
-                small_search = search_patch
                 sc = self._contour_image(search_patch)
                 result = cv2.matchTemplate(sc, vis_template, cv2.TM_CCOEFF_NORMED)
-                _, full_score, _, full_loc = cv2.minMaxLoc(result)
-            full_score = float(full_score)
+                if self._density_suppress:
+                    result = self._suppress_high_density(result, sc)
+
+        _, full_score, _, full_loc = cv2.minMaxLoc(result)
+        full_score = float(full_score)
+        if scale < 1.0:
+            full_loc = (int(full_loc[0] / scale), int(full_loc[1] / scale))
+
+        # Store for ambiguity check
+        small_search = cv2.resize(search_patch, None, fx=scale, fy=scale) if scale < 1.0 else search_patch
 
         full_dx = sx + full_loc[0] + crop_w / 2.0 - vis_cx_offset - self.current_centroid[0]
         full_dy = sy + full_loc[1] + crop_h / 2.0 - vis_cy_offset - self.current_centroid[1]
@@ -484,6 +495,54 @@ class TemplateTracker:
         except Exception:
             pass
         return False
+
+    def _suppress_high_density(
+        self, response: np.ndarray, edge_img: np.ndarray,
+    ) -> np.ndarray:
+        """Suppress NCC response in regions with anomalously high edge density.
+
+        Foreground objects (trees, poles, buildings) are closer to the camera
+        and produce much denser edge patterns than the distant aircraft. This
+        method creates a density map from the edge image, then multiplies the
+        NCC response by a suppression mask that penalises high-density regions.
+
+        Args:
+            response: NCC correlation result (h, w) float32.
+            edge_img: Edge/contour image of the search region (H, W) float32.
+
+        Returns:
+            Suppressed response, same shape as input.
+        """
+        try:
+            rh, rw = response.shape
+            eh, ew = edge_img.shape
+
+            # Edge density: large blur over edge image to capture cluster density
+            density = cv2.GaussianBlur(edge_img, (0, 0), sigmaX=20.0)
+
+            # Crop density map to match NCC response dimensions
+            # (NCC result is H - th + 1, W - tw + 1 relative to search region)
+            crop_h = min(rh, eh)
+            crop_w = min(rw, ew)
+            density_crop = density[:crop_h, :crop_w]
+
+            # Normalise and create suppression mask
+            dmx = density_crop.max()
+            if dmx > 1e-6:
+                density_crop = density_crop / dmx
+
+            # Soft suppression: high density → low weight
+            mask = 1.0 / (1.0 + self._density_beta * density_crop)
+
+            # Apply to response (handle size mismatch gracefully)
+            if crop_h == rh and crop_w == rw:
+                return response * mask.astype(np.float32)
+            else:
+                # Resize mask to match response
+                mask_resized = cv2.resize(mask, (rw, rh))
+                return response * mask_resized.astype(np.float32)
+        except Exception:
+            return response
 
     def _update_transition(self) -> tuple[float, float]:
         """Advance smooth transition by one frame. Returns interpolated centroid."""

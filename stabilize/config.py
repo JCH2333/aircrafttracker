@@ -57,9 +57,14 @@ class StabilizerConfig:
     canny_high_threshold: int = 90   # Canny high threshold (blended with auto-tune)
     edge_blur_sigma: float = 5.0     # Gaussian blur sigma for contour bands
 
-    # Orientation-aware matching (replaces magnitude-only Sobel)
+    # Orientation-aware matching (experimental — use_edge_matching to enable)
     orient_bins: int = 4              # number of orientation bins (0–π quantized)
     orient_mag_threshold: float = 0.1 # min normalized magnitude for reliable orientation
+    use_edge_matching: bool = False    # True = orientation channels; False = magnitude NCC
+
+    # Edge density suppression (foreground trees/poles have denser edges)
+    edge_density_suppress: bool = True   # suppress high edge-density regions in NCC
+    edge_density_beta: float = 3.0       # suppression strength (higher = more aggressive)
 
     # Smooth transition on detection re-init
     transition_frames: int = 10       # frames to smooth over when jumping
