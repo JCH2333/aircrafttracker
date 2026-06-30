@@ -43,6 +43,13 @@ class TemplateTracker:
         self.last_match_score: float = 0.0
         self.frames_since_detect: int = 0
 
+        # Orientation channel caches (full-scale + downscaled)
+        self.template_channels: list[np.ndarray] = []
+        self.template_channels_small: list[np.ndarray] = []
+        self.tail_template_channels: list[np.ndarray] = []
+        self.tail_template_channels_small: list[np.ndarray] = []
+        self._channel_weights: list[float] = []  # per-channel energy weight
+
         # Tail config
         self._tail_ratio: float = config.tail_template_ratio
         self._tail_threshold: float = config.tail_disagreement_threshold
@@ -82,6 +89,34 @@ class TemplateTracker:
     @property
     def velocity(self) -> tuple[float, float]:
         return (self._vx, self._vy)
+
+    def _build_template_channels(self, gray_patch: np.ndarray) -> tuple[list[np.ndarray], list[np.ndarray], list[float]]:
+        """Build orientation channel caches from a grayscale template patch.
+
+        Returns:
+            (full_scale_channels, small_scale_channels, channel_weights)
+        """
+        n_bins = self.config.orient_bins
+        scale = self.config.match_downscale
+
+        full_channels = self._orient_channels(gray_patch, n_bins)
+
+        # Channel weights from per-channel energy (constant for template lifetime)
+        weights = [float(ch.sum()) for ch in full_channels]
+        total_w = sum(weights)
+        if total_w > 1e-6:
+            weights = [w / total_w for w in weights]
+        else:
+            weights = [1.0 / n_bins] * n_bins
+
+        # Downscaled channels
+        if scale < 1.0:
+            small_patch = cv2.resize(gray_patch, None, fx=scale, fy=scale)
+            small_channels = self._orient_channels(small_patch, n_bins)
+        else:
+            small_channels = full_channels
+
+        return full_channels, small_channels, weights
 
     def init_from_detection(
         self,
@@ -134,8 +169,12 @@ class TemplateTracker:
         # Direct init (first frame or small jump)
         self.template_raw = new_template_raw
         self.template = new_template
+        self.template_channels, self.template_channels_small, self._channel_weights = \
+            self._build_template_channels(new_template_raw)
         self.tail_template_raw = new_tail_raw
         self.tail_template = new_tail
+        self.tail_template_channels, self.tail_template_channels_small, _ = \
+            self._build_template_channels(new_tail_raw)
         self.template_bbox = (x, y, w, h)
         self.current_centroid = (target_cx, target_cy)
         self.last_match_score = 1.0
@@ -205,31 +244,83 @@ class TemplateTracker:
             if (ex - sx < crop_w) or (ey - sy < crop_h):
                 return None
 
-        # ── Full template matching (downscale for speed) ──
+        # ── Full template matching (orientation channels) ──
         scale = self.config.match_downscale
         search_patch = gray[sy:ey, sx:ex]
-        if scale < 1.0:
-            small_search = cv2.resize(search_patch, None, fx=scale, fy=scale)
-            small_tmpl = cv2.resize(vis_template, None, fx=scale, fy=scale)
-            sc = self._contour_image(small_search)
-            result = cv2.matchTemplate(sc, small_tmpl, cv2.TM_CCOEFF_NORMED)
+
+        if self.template_channels:
+            # Orientation-aware multi-channel matching
+            n_bins = len(self.template_channels)
+            if scale < 1.0:
+                small_search = cv2.resize(search_patch, None, fx=scale, fy=scale)
+                search_channels = self._orient_channels(small_search, n_bins)
+                tmpl_channels = self.template_channels_small
+            else:
+                search_channels = self._orient_channels(search_patch, n_bins)
+                tmpl_channels = self.template_channels
+
+            # Crop template channels for boundary-clipped visible region
+            if crop_w < tw or crop_h < th:
+                if scale < 1.0:
+                    sc_x1 = int(crop_x1 * scale)
+                    sc_x2 = int(crop_x2 * scale)
+                    sc_y1 = int(crop_y1 * scale)
+                    sc_y2 = int(crop_y2 * scale)
+                else:
+                    sc_x1, sc_x2 = crop_x1, crop_x2
+                    sc_y1, sc_y2 = crop_y1, crop_y2
+                tmpl_channels = [
+                    ch[sc_y1:sc_y2, sc_x1:sc_x2] for ch in tmpl_channels
+                ]
+
+            # Multi-channel NCC: match each orientation channel independently
+            result = None
+            for i in range(n_bins):
+                ch_result = cv2.matchTemplate(
+                    search_channels[i], tmpl_channels[i], cv2.TM_CCOEFF_NORMED,
+                )
+                w = self._channel_weights[i] if i < len(self._channel_weights) else 1.0 / n_bins
+                if result is None:
+                    result = ch_result * w
+                else:
+                    result += ch_result * w
+
             _, full_score, _, full_loc = cv2.minMaxLoc(result)
-            full_loc = (int(full_loc[0] / scale), int(full_loc[1] / scale))
+            full_score = float(full_score)
+            if scale < 1.0:
+                full_loc = (int(full_loc[0] / scale), int(full_loc[1] / scale))
+
+            # Store for ambiguity check
+            small_search = cv2.resize(search_patch, None, fx=scale, fy=scale) if scale < 1.0 else search_patch
         else:
-            sc = self._contour_image(search_patch)
-            result = cv2.matchTemplate(sc, vis_template, cv2.TM_CCOEFF_NORMED)
-            _, full_score, _, full_loc = cv2.minMaxLoc(result)
-        full_score = float(full_score)
+            # Fallback: legacy magnitude-only matching
+            if scale < 1.0:
+                small_search = cv2.resize(search_patch, None, fx=scale, fy=scale)
+                small_tmpl = cv2.resize(vis_template, None, fx=scale, fy=scale)
+                sc = self._contour_image(small_search)
+                result = cv2.matchTemplate(sc, small_tmpl, cv2.TM_CCOEFF_NORMED)
+                _, full_score, _, full_loc = cv2.minMaxLoc(result)
+                full_loc = (int(full_loc[0] / scale), int(full_loc[1] / scale))
+            else:
+                small_search = search_patch
+                sc = self._contour_image(search_patch)
+                result = cv2.matchTemplate(sc, vis_template, cv2.TM_CCOEFF_NORMED)
+                _, full_score, _, full_loc = cv2.minMaxLoc(result)
+            full_score = float(full_score)
+
         full_dx = sx + full_loc[0] + crop_w / 2.0 - vis_cx_offset - self.current_centroid[0]
         full_dy = sy + full_loc[1] + crop_h / 2.0 - vis_cy_offset - self.current_centroid[1]
 
-        # ── Ambiguity check ──
-        ambig_search = small_search if scale < 1.0 else search_patch
-        ambig_tmpl = small_tmpl if scale < 1.0 else vis_template
-        ambig_x = int(full_loc[0] / scale) if scale < 1.0 else full_loc[0]
-        ambig_y = int(full_loc[1] / scale) if scale < 1.0 else full_loc[1]
-        if self._check_ambiguity(ambig_search, ambig_tmpl, full_score, ambig_x, ambig_y):
-            full_ok = False
+        # ── Ambiguity check (uses legacy contour for now) ──
+        ambig_search = small_search
+        if self.template is not None:
+            ambig_tmpl = cv2.resize(self.template, None, fx=scale, fy=scale) if scale < 1.0 and self.template is not None else self.template
+            ambig_x = int(full_loc[0] / scale) if scale < 1.0 else full_loc[0]
+            ambig_y = int(full_loc[1] / scale) if scale < 1.0 else full_loc[1]
+            if crop_w < tw or crop_h < th:
+                ambig_tmpl = ambig_tmpl[crop_y1:crop_y2, crop_x1:crop_x2]
+            if self._check_ambiguity(ambig_search, ambig_tmpl, full_score, ambig_x, ambig_y):
+                full_ok = False
 
         # ── Tail template matching ──
         tail_dx = full_dx
@@ -339,6 +430,8 @@ class TemplateTracker:
                     new_patch, self._update_alpha, 0,
                 )
                 self.template = self._contour_image(self.template_raw)
+                self.template_channels, self.template_channels_small, self._channel_weights = \
+                    self._build_template_channels(self.template_raw)
             # Also update tail template
             if self.tail_template_raw is not None:
                 tail_h = max(10, int(th * self._tail_ratio))
@@ -349,6 +442,8 @@ class TemplateTracker:
                         tail_patch, self._update_alpha, 0,
                     )
                     self.tail_template = self._contour_image(self.tail_template_raw)
+                    self.tail_template_channels, self.tail_template_channels_small, _ = \
+                        self._build_template_channels(self.tail_template_raw)
 
         self.template_bbox = (tx, ty, tw, th)
         self.frames_since_detect += 1
@@ -399,8 +494,12 @@ class TemplateTracker:
             nt = self._transition
             self.template_raw = nt["new_template_raw"]
             self.template = nt["new_template"]
+            self.template_channels, self.template_channels_small, self._channel_weights = \
+                self._build_template_channels(nt["new_template_raw"])
             self.tail_template_raw = nt["new_tail_raw"]
             self.tail_template = nt["new_tail"]
+            self.tail_template_channels, self.tail_template_channels_small, _ = \
+                self._build_template_channels(nt["new_tail_raw"])
             self.template_bbox = nt["new_bbox"]
             self.current_centroid = (t["target_cx"], t["target_cy"])
             self._vx = 0.0
@@ -452,3 +551,61 @@ class TemplateTracker:
         if mx > 1e-6:
             mag /= mx
         return mag
+
+    def _orient_channels(
+        self, gray: np.ndarray, n_bins: int | None = None,
+    ) -> list[np.ndarray]:
+        """Decompose gradient magnitude into orientation channels.
+
+        Each channel contains edges oriented in a specific direction range.
+        Low-magnitude pixels (unreliable orientation) are zeroed in all
+        channels. This makes NCC matching orientation-aware: an aircraft's
+        structured edges (horizontal fuselage, diagonal wings) concentrate
+        energy in a few channels, while tree branches (random orientations)
+        spread energy evenly — producing lower combined correlation.
+
+        Args:
+            gray: Grayscale image (uint8 or float32).
+            n_bins: Number of orientation bins (default: config.orient_bins).
+
+        Returns:
+            List of n_bins float32 arrays, each same shape as gray, values [0,1].
+        """
+        if n_bins is None:
+            n_bins = self.config.orient_bins
+
+        gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+
+        # Gradient magnitude
+        mag = np.sqrt(gx ** 2 + gy ** 2)
+        mag_max = mag.max()
+        if mag_max < 1e-6:
+            return [np.zeros_like(gray, dtype=np.float32) for _ in range(n_bins)]
+
+        mag_norm = mag / mag_max
+
+        # Unsigned gradient orientation: [0, π)
+        # arctan2 returns [-π, π]; modulo π maps opposite directions together
+        orient = np.arctan2(gy, gx) % np.pi
+
+        # Quantize orientation into n_bins
+        bin_width = np.pi / n_bins
+        bin_idx = np.floor(orient / bin_width).astype(np.int32)
+        bin_idx = np.clip(bin_idx, 0, n_bins - 1)
+
+        # Only pixels with strong enough gradient get assigned an orientation
+        reliable = mag_norm >= self.config.orient_mag_threshold
+
+        channels = []
+        for b in range(n_bins):
+            ch = np.where((bin_idx == b) & reliable, mag_norm, 0.0).astype(np.float32)
+            # Gaussian blur to spread edges into soft bands for NCC tolerance
+            ch = cv2.GaussianBlur(ch, (0, 0), self._edge_sigma)
+            # Per-channel normalize
+            mx = ch.max()
+            if mx > 1e-6:
+                ch /= mx
+            channels.append(ch)
+
+        return channels

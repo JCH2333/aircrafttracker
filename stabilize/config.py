@@ -57,6 +57,10 @@ class StabilizerConfig:
     canny_high_threshold: int = 90   # Canny high threshold (blended with auto-tune)
     edge_blur_sigma: float = 5.0     # Gaussian blur sigma for contour bands
 
+    # Orientation-aware matching (replaces magnitude-only Sobel)
+    orient_bins: int = 8              # number of orientation bins (0–π quantized)
+    orient_mag_threshold: float = 0.1 # min normalized magnitude for reliable orientation
+
     # Smooth transition on detection re-init
     transition_frames: int = 10       # frames to smooth over when jumping
     transition_threshold: float = 30.0  # min jump distance (px) to trigger transition
