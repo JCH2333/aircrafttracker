@@ -223,6 +223,14 @@ class TemplateTracker:
         full_dx = sx + full_loc[0] + crop_w / 2.0 - vis_cx_offset - self.current_centroid[0]
         full_dy = sy + full_loc[1] + crop_h / 2.0 - vis_cy_offset - self.current_centroid[1]
 
+        # ── Ambiguity check ──
+        ambig_search = small_search if scale < 1.0 else search_patch
+        ambig_tmpl = small_tmpl if scale < 1.0 else vis_template
+        ambig_x = int(full_loc[0] / scale) if scale < 1.0 else full_loc[0]
+        ambig_y = int(full_loc[1] / scale) if scale < 1.0 else full_loc[1]
+        if self._check_ambiguity(ambig_search, ambig_tmpl, full_score, ambig_x, ambig_y):
+            full_ok = False
+
         # ── Tail template matching ──
         tail_dx = full_dx
         tail_dy = full_dy
@@ -345,6 +353,36 @@ class TemplateTracker:
         self.template_bbox = (tx, ty, tw, th)
         self.frames_since_detect += 1
         return self.current_centroid
+
+    def _check_ambiguity(self, search_img, tmpl, best_score, bx, by) -> bool:
+        """Check if the NCC response has multiple competing peaks (ambiguity).
+
+        When two distinct regions have similar high correlation (e.g. the
+        aircraft and a tree), neither should be trusted. Returns True if
+        the scene is ambiguous.
+        """
+        try:
+            sc = self._contour_image(search_img)
+            result = cv2.matchTemplate(sc, tmpl, cv2.TM_CCOEFF_NORMED)
+            # Suppress a window around the best peak
+            h, w = result.shape
+            suppress_r = max(tmpl.shape[0] // 4, 10)
+            suppress_c = max(tmpl.shape[1] // 4, 10)
+            y1 = max(0, by - suppress_r)
+            y2 = min(h, by + suppress_r)
+            x1 = max(0, bx - suppress_c)
+            x2 = min(w, bx + suppress_c)
+            result[y1:y2, x1:x2] = -999
+            # Find second-best peak
+            _, second_best, _, _ = cv2.minMaxLoc(result)
+            ratio = second_best / (best_score + 1e-8)
+            if ratio > 0.85:
+                logger.debug("Ambiguity: best=%.3f 2nd=%.3f ratio=%.2f",
+                             best_score, second_best, ratio)
+                return True
+        except Exception:
+            pass
+        return False
 
     def _update_transition(self) -> tuple[float, float]:
         """Advance smooth transition by one frame. Returns interpolated centroid."""
