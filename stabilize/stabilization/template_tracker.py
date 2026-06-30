@@ -49,6 +49,7 @@ class TemplateTracker:
         self.tail_template_channels: list[np.ndarray] = []
         self.tail_template_channels_small: list[np.ndarray] = []
         self._channel_weights: list[float] = []  # per-channel energy weight
+        self._channels_frame: int = 0  # throttle channel rebuild
 
         # Tail config
         self._tail_ratio: float = config.tail_template_ratio
@@ -179,6 +180,7 @@ class TemplateTracker:
         self.current_centroid = (target_cx, target_cy)
         self.last_match_score = 1.0
         self.frames_since_detect = 0
+        self._channels_frame = 0
         self._vx = 0.0
         self._vy = 0.0
         self._transition = None
@@ -430,8 +432,11 @@ class TemplateTracker:
                     new_patch, self._update_alpha, 0,
                 )
                 self.template = self._contour_image(self.template_raw)
-                self.template_channels, self.template_channels_small, self._channel_weights = \
-                    self._build_template_channels(self.template_raw)
+                # Rebuild orientation channels every 5 frames (expensive: 2×N Sobel+GaussianBlur)
+                if self._channels_frame % 5 == 0:
+                    self.template_channels, self.template_channels_small, self._channel_weights = \
+                        self._build_template_channels(self.template_raw)
+                self._channels_frame += 1
             # Also update tail template
             if self.tail_template_raw is not None:
                 tail_h = max(10, int(th * self._tail_ratio))
@@ -442,8 +447,9 @@ class TemplateTracker:
                         tail_patch, self._update_alpha, 0,
                     )
                     self.tail_template = self._contour_image(self.tail_template_raw)
-                    self.tail_template_channels, self.tail_template_channels_small, _ = \
-                        self._build_template_channels(self.tail_template_raw)
+                    if self._channels_frame % 5 == 1:  # offset from full template rebuild
+                        self.tail_template_channels, self.tail_template_channels_small, _ = \
+                            self._build_template_channels(self.tail_template_raw)
 
         self.template_bbox = (tx, ty, tw, th)
         self.frames_since_detect += 1
@@ -505,6 +511,7 @@ class TemplateTracker:
             self._vx = 0.0
             self._vy = 0.0
             self.frames_since_detect = 0
+            self._channels_frame = 0
             self.last_match_score = 1.0
             self._transition = None
             logger.debug("Transition complete")

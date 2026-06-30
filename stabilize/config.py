@@ -58,7 +58,7 @@ class StabilizerConfig:
     edge_blur_sigma: float = 5.0     # Gaussian blur sigma for contour bands
 
     # Orientation-aware matching (replaces magnitude-only Sobel)
-    orient_bins: int = 8              # number of orientation bins (0–π quantized)
+    orient_bins: int = 4              # number of orientation bins (0–π quantized)
     orient_mag_threshold: float = 0.1 # min normalized magnitude for reliable orientation
 
     # Smooth transition on detection re-init
