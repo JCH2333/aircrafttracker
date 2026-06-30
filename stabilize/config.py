@@ -79,7 +79,7 @@ class StabilizerConfig:
 
     # Debug
     debug_viz: bool = False
-    debug_viz_dir: str = "debug_frames"
+    debug_viz_dir: str = ""  # override output dir for debug video (default: use output_dir)
 
     def resolve_output_path(self) -> Path:
         """Resolve the output path from input_path and output_dir."""

@@ -18,6 +18,11 @@ __pycache__/
 .vscode/
 .idea/
 
+# 调试输出
+debug_frames/
+*_debug.MOV
+*_debug.mp4
+
 # 临时文件
 *.video_only.MOV
 *.npy

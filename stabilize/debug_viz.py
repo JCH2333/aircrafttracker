@@ -1,12 +1,13 @@
 """Debug visualization — overlay tracking info on frames for diagnosis.
 
 Draws bounding boxes, centroids, frame numbers, and match scores
-directly on Pass 1 analysis frames. Saved as PNG sequence for
-frame-by-frame inspection.
+directly on Pass 1 analysis frames. Saved as a video file for
+easy frame-by-frame inspection in any media player.
 """
 
 from pathlib import Path
 
+import av
 import cv2
 import numpy as np
 
@@ -119,19 +120,30 @@ def draw_overlay(
 
 
 class DebugVizWriter:
-    """Writes debug visualization frames to disk as PNG sequence."""
+    """Encodes debug visualization frames to a video file via PyAV."""
 
-    def __init__(self, output_dir: Path):
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, output_path: Path, frame_rate: float, width: int, height: int):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        self._container = av.open(str(output_path), "w")
+        self._stream = self._container.add_stream("libx264", rate=int(frame_rate))
+        self._stream.width = width
+        self._stream.height = height
+        self._stream.pix_fmt = "yuv420p"
+        self._stream.options = {"preset": "ultrafast", "crf": "23"}
         self._count = 0
 
     def write(self, frame_bgr: np.ndarray, frame_idx: int, tracker_state: dict):
-        """Render overlay and save to PNG."""
+        """Draw overlay, encode and mux one frame."""
         out = draw_overlay(frame_bgr, frame_idx, tracker_state)
-        path = self.output_dir / f"frame_{frame_idx:06d}.png"
-        cv2.imwrite(str(path), out, [cv2.IMWRITE_PNG_COMPRESSION, 3])
+        frame_rgb = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
+        av_frame = av.VideoFrame.from_ndarray(frame_rgb, format="rgb24")
+        av_frame.pts = self._count
+        for packet in self._stream.encode(av_frame):
+            self._container.mux(packet)
         self._count += 1
 
     def close(self):
-        pass
+        """Flush encoder and close container."""
+        for packet in self._stream.encode(None):
+            self._container.mux(packet)
+        self._container.close()

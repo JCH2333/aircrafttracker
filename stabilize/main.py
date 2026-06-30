@@ -124,7 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_group.add_argument(
         "--debug-viz",
         action="store_true",
-        help="Save debug visualization frames (PNG sequence with tracking overlay)",
+        help="Save debug visualization video (tracking overlay as {input}_debug.MOV)",
     )
     run_group.add_argument(
         "--gui",
@@ -241,6 +241,7 @@ def _process_folder(args) -> int:
             crf=args.crf,
             preset=args.preset,
             preview=args.preview,
+            debug_viz=args.debug_viz,
         )
         pipeline = StabilizationPipeline(config)
         try:

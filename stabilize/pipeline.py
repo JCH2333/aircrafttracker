@@ -58,6 +58,21 @@ class StabilizationPipeline:
             except Exception:
                 pass
 
+    def _make_debug_viz_path(self) -> Path:
+        """Compute the debug video output path from config.
+
+        Uses config.debug_viz_dir if set, otherwise config.output_dir.
+        Filename is {input_stem}_debug.MOV.
+        """
+        input_stem = Path(self.config.input_path).stem
+        viz_dir = self.config.debug_viz_dir
+        if viz_dir:
+            out_dir = Path(viz_dir)
+        else:
+            out_dir = Path(self.config.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        return out_dir / f"{input_stem}_debug.MOV"
+
     def run(self) -> Path:
         """Execute both passes and return the output path."""
         output_path = self.config.resolve_output_path()
@@ -143,9 +158,16 @@ class StabilizationPipeline:
 
         # Debug visualization
         debug_viz = None
+        debug_viz_path = None
         if self.config.debug_viz:
-            from pathlib import Path
-            debug_viz = DebugVizWriter(Path(self.config.debug_viz_dir))
+            debug_viz_path = self._make_debug_viz_path()
+            debug_viz = DebugVizWriter(
+                output_path=debug_viz_path,
+                frame_rate=reader.frame_rate,
+                width=reader.width,
+                height=reader.height,
+            )
+            logger.info("Debug visualization: %s", debug_viz_path)
 
         centroids = []
         n_detections = 0
@@ -224,6 +246,10 @@ class StabilizationPipeline:
 
         reader.close()
         pbar.close()
+
+        if debug_viz is not None:
+            debug_viz.close()
+            logger.info("Debug visualization written: %s", debug_viz_path)
 
         self.centroids_raw = centroids
 
