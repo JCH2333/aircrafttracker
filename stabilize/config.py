@@ -49,7 +49,7 @@ class StabilizerConfig:
     template_redetect_score: float = 0.50   # re-detect if score drops below this
     template_update_alpha: float = 0.3      # blend factor for template update
     template_velocity_alpha: float = 0.5    # EWMA alpha for velocity estimate
-    template_max_jump_factor: float = 5.0   # reject match if jump > factor * speed
+    template_max_jump_factor: float = 2.0   # reject match if jump > factor * speed
     template_quality_score: float = 0.55    # coast (no template/velocity update) below this
 
     # Edge detection (Canny) for contour-based matching
@@ -62,8 +62,8 @@ class StabilizerConfig:
     orient_mag_threshold: float = 0.1 # min normalized magnitude for reliable orientation
     use_edge_matching: bool = False    # True = orientation channels; False = magnitude NCC
 
-    # Edge density suppression (foreground trees/poles have denser edges)
-    edge_density_suppress: bool = True   # suppress high edge-density regions in NCC
+    # Edge density suppression (experimental)
+    edge_density_suppress: bool = False   # suppress high edge-density regions in NCC
     edge_density_beta: float = 3.0       # suppression strength (higher = more aggressive)
 
     # Smooth transition on detection re-init

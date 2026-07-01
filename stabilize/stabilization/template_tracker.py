@@ -64,17 +64,15 @@ class TemplateTracker:
         self._canny_high: int = config.canny_high_threshold
         self._edge_sigma: float = config.edge_blur_sigma
 
-        # Smooth transition on detection re-init
-        self._transition: dict | None = None  # {start_cx, start_cy, target_cx, target_cy, total, frame}
-        self._transition_frames: int = config.transition_frames
-        self._transition_threshold: float = config.transition_threshold
+        # Jump detection — aircraft motion must be continuous;
+        # large frame-to-frame displacement = tracking failure
+        self._max_jump_factor: float = config.template_max_jump_factor
 
         # Config shortcuts
         self._velocity_alpha: float = config.template_velocity_alpha
         self._base_margin: int = config.template_search_margin
         self._match_threshold: float = config.template_match_threshold
         self._update_alpha: float = config.template_update_alpha
-        self._max_jump_factor: float = config.template_max_jump_factor
         self._quality_score: float = config.template_quality_score
         self._use_edge_matching: bool = config.use_edge_matching
         self._density_suppress: bool = config.edge_density_suppress
@@ -147,30 +145,21 @@ class TemplateTracker:
         new_tail_raw = tail_patch.copy()
         new_tail = self._contour_image(tail_patch)
 
-        # Check if we need a smooth transition
+        # Detection reset: if tracking centroid disagrees with detection by
+        # a large margin, the tracker is following foreground/background.
+        # Reset immediately to detection position — no smoothing.
         if self.current_centroid is not None and self.frames_since_detect > 0:
             old_cx, old_cy = self.current_centroid
             jump_dist = np.sqrt(
                 (target_cx - old_cx) ** 2 + (target_cy - old_cy) ** 2
             )
-            if jump_dist > self._transition_threshold:
-                logger.debug(
-                    "Smooth transition: %.0fpx over %d frames",
-                    jump_dist, self._transition_frames,
+            if jump_dist > 50:  # pixels — hard threshold for "teleport"
+                logger.warning(
+                    "Tracker LOST: detection jump %.0fpx → resetting immediately",
+                    jump_dist,
                 )
-                self._transition = {
-                    "start_cx": old_cx, "start_cy": old_cy,
-                    "target_cx": target_cx, "target_cy": target_cy,
-                    "total": self._transition_frames, "frame": 0,
-                    "new_template_raw": new_template_raw,
-                    "new_template": new_template,
-                    "new_tail_raw": new_tail_raw,
-                    "new_tail": new_tail,
-                    "new_bbox": (x, y, w, h),
-                }
-                return
 
-        # Direct init (first frame or small jump)
+        # Direct init
         self.template_raw = new_template_raw
         self.template = new_template
         self.template_channels, self.template_channels_small, self._channel_weights = \
@@ -194,9 +183,6 @@ class TemplateTracker:
 
     def update(self, frame_bgr: np.ndarray) -> tuple[float, float] | None:
         """Track aircraft via contour-based template matching."""
-        # ── Active transition: skip matching, just interpolate ──
-        if self._transition is not None:
-            return self._update_transition()
 
         if self.template is None or self.template_bbox is None:
             return None
@@ -406,7 +392,8 @@ class TemplateTracker:
         jump_dx = matched_cx - cx_pred
         jump_dy = matched_cy - cy_pred
         jump_dist = np.sqrt(jump_dx ** 2 + jump_dy ** 2)
-        max_jump = max(speed * self._max_jump_factor, self._base_margin * 0.5)
+        # Aircraft + camera motion is continuous — large jumps = tracking failure
+        max_jump = max(speed * self._max_jump_factor, 25.0)
         quality_ok = self.last_match_score >= self._quality_score
 
         if jump_dist > max_jump and self.frames_since_detect > 0:
@@ -544,46 +531,7 @@ class TemplateTracker:
         except Exception:
             return response
 
-    def _update_transition(self) -> tuple[float, float]:
-        """Advance smooth transition by one frame. Returns interpolated centroid."""
-        t = self._transition
-        t["frame"] += 1
-        progress = min(1.0, t["frame"] / t["total"])
-        # Ease-out cubic
-        ease = 1.0 - (1.0 - progress) ** 3
-        cx = t["start_cx"] + (t["target_cx"] - t["start_cx"]) * ease
-        cy = t["start_cy"] + (t["target_cy"] - t["start_cy"]) * ease
-
-        if progress >= 1.0:
-            # Finalize: apply detection template
-            nt = self._transition
-            self.template_raw = nt["new_template_raw"]
-            self.template = nt["new_template"]
-            self.template_channels, self.template_channels_small, self._channel_weights = \
-                self._build_template_channels(nt["new_template_raw"])
-            self.tail_template_raw = nt["new_tail_raw"]
-            self.tail_template = nt["new_tail"]
-            self.tail_template_channels, self.tail_template_channels_small, _ = \
-                self._build_template_channels(nt["new_tail_raw"])
-            self.template_bbox = nt["new_bbox"]
-            self.current_centroid = (t["target_cx"], t["target_cy"])
-            self._vx = 0.0
-            self._vy = 0.0
-            self.frames_since_detect = 0
-            self._channels_frame = 0
-            self.last_match_score = 1.0
-            self._transition = None
-            logger.debug("Transition complete")
-        else:
-            self.current_centroid = (cx, cy)
-            self.frames_since_detect += 1
-
-        return self.current_centroid
-
     def needs_redetection(self) -> bool:
-        # Don't interrupt an active transition
-        if self._transition is not None:
-            return False
         return self.last_match_score < self.config.template_redetect_score
 
     # ── internal ────────────────────────────────────────────────
