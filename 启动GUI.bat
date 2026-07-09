@@ -7,8 +7,27 @@ echo   Aircraft Tracker v6 - Setup / Launch
 echo ============================================
 echo.
 
+:: ---- 0. VC++ Redistributable (prevents 0xc0000142 DLL init failure) ----
+echo [0/5] Checking Visual C++ Redistributable...
+reg query "HKLM\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" /v Installed 2>nul | findstr "0x1" >nul
+if errorlevel 1 (
+    echo   VC++ Redistributable not found. Installing...
+    powershell -Command "Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile '%TEMP%\vc_redist.x64.exe'" 2>&1
+    if errorlevel 1 (
+        echo   [WARN] VC++ download failed. DLL errors may occur.
+    ) else (
+        start /wait "" "%TEMP%\vc_redist.x64.exe" /install /quiet /norestart
+        echo   VC++ Redistributable installed. Please restart this launcher.
+        pause
+        exit /b 0
+    )
+) else (
+    echo   VC++ Redistributable found.
+)
+echo.
+
 :: ---- 1. Python ----
-echo [1/4] Checking Python...
+echo [1/5] Checking Python...
 python --version >nul 2>&1
 if errorlevel 1 (
     echo   Python not found. Attempting auto-install via winget...
@@ -30,7 +49,7 @@ python --version 2>&1
 echo.
 
 :: ---- 2. Dependencies ----
-echo [2/4] Checking dependencies...
+echo [2/5] Checking dependencies...
 :: Ensure pip is available even if Scripts not on PATH
 python -m pip --version >nul 2>&1
 if errorlevel 1 (
