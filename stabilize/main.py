@@ -64,8 +64,28 @@ def build_parser() -> argparse.ArgumentParser:
     det_group.add_argument(
         "--reinterval",
         type=int,
-        default=30,
-        help="Frames between re-detection (default: 30)",
+        default=10,
+        help="Frames between re-detection (default: 10)",
+    )
+    det_group.add_argument(
+        "--tracking-backend",
+        choices=["hybrid", "legacy"],
+        default="hybrid",
+        help="Tracking backend: SAM 2 + masked features, or legacy templates",
+    )
+    det_group.add_argument(
+        "--sam2-model",
+        default="facebook/sam2.1-hiera-base-plus",
+        help="Hugging Face SAM 2 model id",
+    )
+    det_group.add_argument(
+        "--track-file",
+        type=Path,
+        default=None,
+        help=(
+            "Manual anchor sidecar path; use a directory for folder input "
+            "(default: <output-dir>/<video>.track.json)"
+        ),
     )
 
     # Smoothing options
@@ -73,8 +93,8 @@ def build_parser() -> argparse.ArgumentParser:
     smooth_group.add_argument(
         "--smooth-window",
         type=int,
-        default=61,
-        help="Smoothing filter window in frames, must be odd (default: 61)",
+        default=15,
+        help="Smoothing filter window in frames, must be odd (default: 15)",
     )
     smooth_group.add_argument(
         "--smooth-method",
@@ -125,6 +145,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--debug-viz",
         action="store_true",
         help="Save debug visualization video (tracking overlay as {input}_debug.MOV)",
+    )
+    run_group.add_argument(
+        "--review",
+        action="store_true",
+        help="Pause after analysis to correct low-confidence segments",
     )
     run_group.add_argument(
         "--gui",
@@ -183,6 +208,7 @@ def main(argv: list[str] | None = None) -> int:
         output_path=args.output,
         output_dir=args.output_dir,
         detector_backend=args.detector,
+        tracking_backend=args.tracking_backend,
         detection_confidence=args.conf,
         detection_interval=args.reinterval,
         smoother_method=args.smooth_method,
@@ -192,6 +218,9 @@ def main(argv: list[str] | None = None) -> int:
         preset=args.preset,
         preview=args.preview,
         debug_viz=args.debug_viz,
+        review=args.review,
+        track_file=args.track_file,
+        sam2_model_id=args.sam2_model,
     )
 
     pipeline = StabilizationPipeline(config)
@@ -221,6 +250,15 @@ def _process_folder(args) -> int:
     if not videos:
         print(f"No video files found in {input_dir}")
         return 1
+    if (
+        args.track_file is not None
+        and args.track_file.suffix
+        and len(videos) > 1
+    ):
+        print(
+            "--track-file must be a directory when processing multiple videos"
+        )
+        return 1
 
     print(f"Found {len(videos)} video(s) in {input_dir}")
     print("=" * 50)
@@ -233,6 +271,7 @@ def _process_folder(args) -> int:
             output_path=args.output,
             output_dir=args.output_dir,
             detector_backend=args.detector,
+            tracking_backend=args.tracking_backend,
             detection_confidence=args.conf,
             detection_interval=args.reinterval,
             smoother_method=args.smooth_method,
@@ -242,6 +281,14 @@ def _process_folder(args) -> int:
             preset=args.preset,
             preview=args.preview,
             debug_viz=args.debug_viz,
+            review=args.review,
+            track_file=(
+                args.track_file / f"{path.stem}.track.json"
+                if args.track_file is not None
+                and not args.track_file.suffix
+                else args.track_file
+            ),
+            sam2_model_id=args.sam2_model,
         )
         pipeline = StabilizationPipeline(config)
         try:

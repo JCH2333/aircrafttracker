@@ -46,6 +46,7 @@ def draw_overlay(
     WHITE = (255, 255, 255)
     GRAY = (180, 180, 180)
     ORANGE = (0, 140, 255)
+    MAGENTA = (255, 0, 255)
 
     bbox = tracker_state.get("bbox")
     tail_bbox = tracker_state.get("tail_bbox")
@@ -55,6 +56,9 @@ def draw_overlay(
     source = tracker_state.get("match_source", "?")
     vel = tracker_state.get("velocity", (0, 0))
     det_used = tracker_state.get("detection_used", False)
+    tracking_state = tracker_state.get("tracking_state", "?")
+    visibility = tracker_state.get("visibility", 0.0)
+    rejected = tracker_state.get("rejected_candidates", ())
 
     # Bounding boxes
     if bbox is not None:
@@ -63,6 +67,12 @@ def draw_overlay(
     if tail_bbox is not None:
         x, y, tw_, th_ = tail_bbox
         cv2.rectangle(out, (x, y), (x + tw_, y + th_), BLUE, 1)
+    for rejected_item in rejected:
+        candidate = getattr(rejected_item, "candidate", None)
+        if candidate is None:
+            continue
+        x, y, bw, bh = candidate.bbox
+        cv2.rectangle(out, (x, y), (x + bw, y + bh), MAGENTA, 1)
 
     # Centroid
     if centroid is not None:
@@ -91,6 +101,8 @@ def draw_overlay(
     texts = [
         f"Score: {score:.3f}",
         f"Source: {source}",
+        f"State: {tracking_state}",
+        f"Visible: {visibility:.2f}",
         f"Vel: ({vel[0]:.1f}, {vel[1]:.1f})",
     ]
     for i, txt in enumerate(texts):

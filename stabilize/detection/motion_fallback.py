@@ -1,8 +1,4 @@
-"""Motion-based fallback detector using frame differencing.
-
-This is a last-resort fallback when both the detector and tracker fail.
-It identifies moving objects by differencing widely-spaced frames.
-"""
+"""Motion proposals used only to rank primary detector candidates."""
 
 import logging
 
@@ -11,6 +7,7 @@ import numpy as np
 
 from stabilize.config import StabilizerConfig
 from stabilize.detection.base_detector import BaseDetector
+from stabilize.tracking.models import DetectionCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +24,14 @@ class MotionFallbackDetector(BaseDetector):
         """No-op: no model to load."""
         pass
 
-    def detect(self, frame_bgr: np.ndarray) -> tuple[int, int, int, int] | None:
-        """Find moving object via frame subtraction.
+    def detect_candidates(self, frame_bgr: np.ndarray) -> list[DetectionCandidate]:
+        """Propose moving regions via frame subtraction.
 
         Args:
             frame_bgr: uint8 BGR image.
 
         Returns:
-            (x, y, w, h) of largest moving region or None.
+            Motion proposals. They must pass temporal gating before use.
         """
         h, w = frame_bgr.shape[:2]
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
@@ -42,7 +39,7 @@ class MotionFallbackDetector(BaseDetector):
 
         if self._prev_frame is None:
             self._prev_frame = gray
-            return None
+            return []
 
         # Absolute difference
         diff = cv2.absdiff(self._prev_frame, gray)
@@ -52,18 +49,32 @@ class MotionFallbackDetector(BaseDetector):
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             self._prev_frame = gray
-            return None
+            return []
 
         # Pick largest contour that could be an aircraft (>1% of frame area)
         min_area = (w * h) * 0.01
         valid = [c for c in contours if cv2.contourArea(c) > min_area]
         if not valid:
             self._prev_frame = gray
-            return None
+            return []
 
-        largest = max(valid, key=cv2.contourArea)
-        x, y, bw, bh = cv2.boundingRect(largest)
         self._prev_frame = gray
-
-        logger.debug("Motion fallback: box=(%d,%d,%d,%d)", x, y, bw, bh)
-        return (x, y, bw, bh)
+        candidates = []
+        for contour in valid:
+            x, y, bw, bh = cv2.boundingRect(contour)
+            area_ratio = cv2.contourArea(contour) / max(float(w * h), 1.0)
+            if area_ratio > 0.50:
+                logger.debug(
+                    "Motion proposal rejected before gating: %.1f%% of frame",
+                    area_ratio * 100,
+                )
+                continue
+            candidates.append(
+                DetectionCandidate(
+                    bbox=(x, y, bw, bh),
+                    score=float(min(0.49, 0.2 + area_ratio)),
+                    label=None,
+                    source="motion",
+                )
+            )
+        return candidates

@@ -18,6 +18,7 @@ from tkinter import filedialog, messagebox
 
 from stabilize.config import StabilizerConfig
 from stabilize.pipeline import StabilizationPipeline
+from stabilize.review_dialog import show_review_dialog
 
 logger = logging.getLogger(__name__)
 
@@ -460,9 +461,14 @@ class AircraftTrackerApp(ctk.CTk):
                     output_dir=self._output_dir,
                     device=device,
                     video_codec=codec,
+                    tracking_backend=(
+                        "hybrid" if self._mode_var.get() == "GPU" else "legacy"
+                    ),
+                    review=True,
                 )
                 pipeline = StabilizationPipeline(config)
                 pipeline.set_progress_callback(self._on_pipeline_progress)
+                pipeline.set_review_callback(self._request_track_review)
                 pipeline.run()
                 self.queue.set_status(index, "done")
             except Exception as e:
@@ -481,7 +487,25 @@ class AircraftTrackerApp(ctk.CTk):
 
     def _on_pipeline_progress(self, phase: int, current: int, total: int):
         """Callback from pipeline — push to UI queue."""
-        self._progress_queue.put({"phase": phase, "current": current, "total": total})
+        self._progress_queue.put({
+            "type": "progress",
+            "phase": phase,
+            "current": current,
+            "total": total,
+        })
+
+    def _request_track_review(self, request):
+        """Block the worker while the main thread shows the review dialog."""
+        done = threading.Event()
+        holder = {}
+        self._progress_queue.put({
+            "type": "review",
+            "request": request,
+            "done": done,
+            "holder": holder,
+        })
+        done.wait()
+        return holder.get("anchors", [])
 
     # ── Progress polling ───────────────────────────────────────
 
@@ -489,6 +513,13 @@ class AircraftTrackerApp(ctk.CTk):
         try:
             while True:
                 msg = self._progress_queue.get_nowait()
+                if msg.get("type") == "review":
+                    try:
+                        anchors = show_review_dialog(self, msg["request"])
+                        msg["holder"]["anchors"] = anchors
+                    finally:
+                        msg["done"].set()
+                    continue
                 phase = msg["phase"]
                 current = msg["current"]
                 total = msg["total"]

@@ -13,10 +13,12 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .eggs/
+.venv-gpu/
 
 # IDE
 .vscode/
 .idea/
+.codegraph/
 
 # 调试输出
 debug_frames/

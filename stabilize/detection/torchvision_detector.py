@@ -16,6 +16,7 @@ from torchvision.models.detection import (
 
 from stabilize.config import StabilizerConfig
 from stabilize.detection.base_detector import BaseDetector
+from stabilize.tracking.models import DetectionCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +49,8 @@ class TorchvisionDetector(BaseDetector):
         self._warmed = True
         logger.info("Model warmup complete.")
 
-    def detect(self, frame_bgr: np.ndarray) -> tuple[int, int, int, int] | None:
-        """Detect the largest aircraft-like object in the frame.
+    def detect_candidates(self, frame_bgr: np.ndarray) -> list[DetectionCandidate]:
+        """Detect aircraft-like objects in the frame.
 
         Accepts multiple COCO vehicle classes since civil aviation aircraft
         may be misclassified from ground-level viewpoints (e.g., as "bus").
@@ -62,7 +63,7 @@ class TorchvisionDetector(BaseDetector):
             frame_bgr: uint8 BGR image of shape (H, W, 3).
 
         Returns:
-            (x, y, w, h) bounding box or None.
+            Candidate boxes for temporal gating.
         """
         h, w = frame_bgr.shape[:2]
         max_dim = self.config.analysis_downscale
@@ -105,20 +106,31 @@ class TorchvisionDetector(BaseDetector):
                 candidates.append((box, area, score, int(label)))
 
         if not candidates:
-            return None
+            return []
 
-        # Pick largest candidate box
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        best_box, area, score, label = candidates[0]
         coco_names = {4: "airplane", 5: "bus", 6: "train", 7: "truck", 8: "boat"}
-        label_name = coco_names.get(label, str(label))
-
-        logger.debug(
-            "Detection: class=%s(%d), box=(%.0f,%.0f,%.0f,%.0f) area=%.0f conf=%.2f",
-            label_name, label,
-            best_box[0], best_box[1], best_box[2], best_box[3],
-            area, score,
-        )
-
-        x1, y1, x2, y2 = best_box
-        return (int(x1), int(y1), int(x2 - x1), int(y2 - y1))
+        results = []
+        for box, area, score, label in candidates:
+            label_name = coco_names.get(label, str(label))
+            logger.debug(
+                "Detection candidate: class=%s(%d), "
+                "box=(%.0f,%.0f,%.0f,%.0f) area=%.0f conf=%.2f",
+                label_name, label,
+                box[0], box[1], box[2], box[3],
+                area, score,
+            )
+            x1, y1, x2, y2 = box
+            results.append(
+                DetectionCandidate(
+                    bbox=(
+                        int(x1),
+                        int(y1),
+                        int(x2 - x1),
+                        int(y2 - y1),
+                    ),
+                    score=float(score),
+                    label=int(label),
+                    source="torchvision",
+                )
+            )
+        return results
