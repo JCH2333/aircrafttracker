@@ -110,6 +110,34 @@ class TrajectoryTests(unittest.TestCase):
         self.assertAlmostEqual(centers[15][0], 200.0 + 15 * 3.0, delta=2.0)
         self.assertAlmostEqual(centers[15][1], 400.0 - 15, delta=2.0)
 
+    def test_mask_recovery_is_a_strong_identity_anchor(self):
+        observations = build_linear_observations(40, 0, 0)
+        observations[20] = TrackObservation(
+            frame_idx=20,
+            center=(500.0, 300.0),
+            bbox=(450, 270, 100, 60),
+            confidence=0.75,
+            visibility=0.8,
+            state=TrackingState.TRACKING,
+            source="sam2_mask_recovery",
+            measured=True,
+        )
+        observations[21] = TrackObservation(
+            frame_idx=21,
+            center=(480.0, 300.0),
+            bbox=(430, 270, 100, 60),
+            confidence=0.75,
+            visibility=0.8,
+            state=TrackingState.TRACKING,
+            source="sam2_mask_recovery",
+            measured=True,
+        )
+
+        centers, _ = smooth_observations(observations, 1920, 1080)
+
+        self.assertAlmostEqual(centers[20][0], 500.0, delta=20.0)
+        self.assertAlmostEqual(centers[21][0], 480.0, delta=20.0)
+
 
 if __name__ == "__main__":
     unittest.main()

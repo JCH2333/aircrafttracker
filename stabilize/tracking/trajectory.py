@@ -60,6 +60,10 @@ def smooth_observations(
         ]
         for idx, observation in enumerate(observations):
             if (
+                observation.source == "sam2_mask_recovery"
+                and observation.confidence >= 0.65
+                and observation.center is not None
+            ) or (
                 observation.state == TrackingState.MANUAL_ANCHOR
                 and observation.center is not None
             ):
@@ -179,9 +183,12 @@ def _kalman_rts(
 
         if _is_trusted_observation(obs):
             confidence = max(obs.confidence, 0.05)
-            variance = 1e-4 if obs.state == TrackingState.MANUAL_ANCHOR else (
-                1.0 + 36.0 * (1.0 - confidence) ** 2
-            )
+            if obs.state == TrackingState.MANUAL_ANCHOR:
+                variance = 1e-4
+            elif obs.source == "sam2_mask_recovery":
+                variance = 1e-4 + 0.01 * (1.0 - confidence) ** 2
+            else:
+                variance = 1.0 + 36.0 * (1.0 - confidence) ** 2
             r = np.eye(2, dtype=np.float64) * variance
             z = np.asarray(obs.center, dtype=np.float64)
             innovation = z - h @ x

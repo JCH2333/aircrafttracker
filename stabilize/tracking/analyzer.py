@@ -322,8 +322,7 @@ def analyze_hybrid(
                         predicted_center=state.predicted_center,
                         gate_multiplier=(
                             8.0
-                            if state.state
-                            in (TrackingState.OCCLUDED, TrackingState.LOST)
+                            if state.recovering
                             else 3.0
                         ),
                     )
@@ -412,6 +411,7 @@ def analyze_hybrid(
                         frame_bgr,
                         valid_mask,
                         predicted_center=state.predicted_center,
+                        recovery_mode=state.recovering,
                     )
                     confidence = (
                         0.85 * measurement.confidence
@@ -424,10 +424,13 @@ def analyze_hybrid(
                         confidence=confidence,
                         visibility=measurement.visibility,
                         source=(
-                            "sam2_lk"
+                            "sam2_mask_recovery"
+                            if measurement.mask_recovery
+                            else "sam2_lk"
                             if measurement.center is not None
                             else "occluded"
                         ),
+                        reset_motion=measurement.mask_recovery,
                     )
 
                 observations[idx] = _to_source_observation(observation, cache)
@@ -595,10 +598,10 @@ def _mask_matches_prediction(
         gate_multiplier
         * float(np.hypot(predicted_bbox[2], predicted_bbox[3])),
     )
-    return (
-        distance <= gate_radius
-        and _mask_bbox_iou(mask, predicted_bbox) >= 0.01
-    )
+    overlap = _mask_bbox_iou(mask, predicted_bbox)
+    if gate_multiplier <= 3.0 and overlap < 0.01:
+        return False
+    return distance <= gate_radius
 
 
 def _mask_bbox_iou(

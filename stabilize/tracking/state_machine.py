@@ -41,6 +41,14 @@ class TrackingStateMachine:
     def velocity(self) -> Point:
         return self._velocity
 
+    @property
+    def recovering(self) -> bool:
+        """Whether measurements are still provisional after a gap."""
+        return (
+            self._recovering
+            or self.state in (TrackingState.OCCLUDED, TrackingState.LOST)
+        )
+
     def update(
         self,
         frame_idx: int,

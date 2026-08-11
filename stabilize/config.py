@@ -52,6 +52,9 @@ class StabilizerConfig:
     feature_max_rotation_degrees: float = 12.0
     feature_max_translation_ratio: float = 0.75
     feature_translation_residual_px: float = 4.5
+    feature_mask_consistency_ratio: float = 0.28
+    feature_mask_consistency_min_px: float = 24.0
+    feature_recovery_mask_min_quality: float = 0.45
 
     # Template matching tracker
     template_search_margin: int = 200  # base pixels to search around predicted position

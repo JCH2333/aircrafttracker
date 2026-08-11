@@ -21,6 +21,7 @@ class FeatureMeasurement:
     visibility: float
     inlier_count: int
     point_count: int
+    mask_recovery: bool = False
 
 
 class MaskedFeatureTracker:
@@ -90,6 +91,7 @@ class MaskedFeatureTracker:
         frame_bgr: np.ndarray,
         mask: np.ndarray | None,
         predicted_center: Point | None = None,
+        recovery_mode: bool = False,
     ) -> FeatureMeasurement:
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         visibility, mask_quality, area = self._measure_mask(mask, gray.shape)
@@ -108,6 +110,13 @@ class MaskedFeatureTracker:
                 mask_quality,
                 area,
                 predicted_center,
+                minimum_confidence=(
+                    self.config.tracking_low_confidence
+                    if recovery_mode
+                    else None
+                ),
+                force_component_anchor=recovery_mode,
+                strict_geometry=not recovery_mode,
             )
             if recovered is not None:
                 return recovered
@@ -129,6 +138,17 @@ class MaskedFeatureTracker:
             **self.lk_params,
         )
         if new_points is None or status_fwd is None:
+            recovered = self._try_mask_recovery(
+                gray,
+                mask,
+                visibility,
+                mask_quality,
+                area,
+                predicted_center,
+                recovery_mode,
+            )
+            if recovered is not None:
+                return recovered
             self.prev_gray = gray
             return FeatureMeasurement(
                 center=None,
@@ -147,6 +167,17 @@ class MaskedFeatureTracker:
             **self.lk_params,
         )
         if back_points is None or status_back is None:
+            recovered = self._try_mask_recovery(
+                gray,
+                mask,
+                visibility,
+                mask_quality,
+                area,
+                predicted_center,
+                recovery_mode,
+            )
+            if recovered is not None:
+                return recovered
             self.prev_gray = gray
             return FeatureMeasurement(
                 center=None,
@@ -172,6 +203,17 @@ class MaskedFeatureTracker:
         old_valid = old_flat[valid]
         new_valid = new_flat[valid]
         if len(new_valid) < 4:
+            recovered = self._try_mask_recovery(
+                gray,
+                mask,
+                visibility,
+                mask_quality,
+                area,
+                predicted_center,
+                recovery_mode,
+            )
+            if recovered is not None:
+                return recovered
             self.prev_points = new_valid.reshape(-1, 1, 2).astype(np.float32)
             self.prev_gray = gray
             return FeatureMeasurement(
@@ -193,6 +235,17 @@ class MaskedFeatureTracker:
             refineIters=10,
         )
         if transform is None or inlier_mask is None:
+            recovered = self._try_mask_recovery(
+                gray,
+                mask,
+                visibility,
+                mask_quality,
+                area,
+                predicted_center,
+                recovery_mode,
+            )
+            if recovered is not None:
+                return recovered
             self.prev_points = new_valid.reshape(-1, 1, 2).astype(np.float32)
             self.prev_gray = gray
             return FeatureMeasurement(
@@ -208,6 +261,17 @@ class MaskedFeatureTracker:
         inlier_count = int(inliers.sum())
         inlier_ratio = inlier_count / max(len(new_valid), 1)
         if inlier_count < 4:
+            recovered = self._try_mask_recovery(
+                gray,
+                mask,
+                visibility,
+                mask_quality,
+                area,
+                predicted_center,
+                recovery_mode,
+            )
+            if recovered is not None:
+                return recovered
             self.prev_points = new_valid.reshape(-1, 1, 2).astype(np.float32)
             self.prev_gray = gray
             return FeatureMeasurement(
@@ -229,6 +293,18 @@ class MaskedFeatureTracker:
                 old_inlier,
                 new_inlier,
             ):
+                recovered = self._try_mask_recovery(
+                    gray,
+                    mask,
+                    visibility,
+                    mask_quality,
+                    area,
+                    predicted_center,
+                    recovery_mode,
+                    strict_geometry=not recovery_mode,
+                )
+                if recovered is not None:
+                    return recovered
                 self.prev_points = None
                 self.prev_gray = gray
                 return FeatureMeasurement(
@@ -247,6 +323,31 @@ class MaskedFeatureTracker:
             new_anchor = (old_anchor[0] + dx, old_anchor[1] + dy)
         else:
             new_anchor = _transform_point(old_anchor, transform)
+
+        if (
+            mask is not None
+            and visibility >= self.config.feature_recovery_mask_min_quality
+            and mask_quality >= self.config.feature_recovery_mask_min_quality
+        ):
+            mask_bbox = _bbox_from_mask_near(mask, None)
+            mask_anchor = self._anchor_from_bbox(mask_bbox)
+            if (
+                mask_anchor is not None
+                and self._mask_disagrees_with_flow(new_anchor, mask_anchor)
+            ):
+                recovered = self._recover_from_mask(
+                    gray,
+                    mask,
+                    visibility,
+                    mask_quality,
+                    area,
+                    predicted_center,
+                    minimum_confidence=self.config.tracking_low_confidence,
+                    force_component_anchor=True,
+                    strict_geometry=True,
+                )
+                if recovered is not None:
+                    return recovered
 
         self.anchor = new_anchor
         self.bbox = _translate_bbox(
@@ -290,6 +391,9 @@ class MaskedFeatureTracker:
         mask_quality: float,
         area: float,
         predicted_center: Point | None,
+        minimum_confidence: float | None = None,
+        force_component_anchor: bool = False,
+        strict_geometry: bool = False,
     ) -> FeatureMeasurement | None:
         if self.anchor is None or self.bbox is None or mask is None:
             return None
@@ -298,12 +402,17 @@ class MaskedFeatureTracker:
             0.65 * mask_quality
             + 0.35 * visibility
         )
-        if recovery_confidence < self.config.tracking_update_confidence:
+        confidence_floor = (
+            self.config.tracking_update_confidence
+            if minimum_confidence is None
+            else minimum_confidence
+        )
+        if recovery_confidence < confidence_floor:
             return None
 
         recovered_bbox = _bbox_from_mask_near(
             mask,
-            predicted_center or self.anchor,
+            None if force_component_anchor else predicted_center or self.anchor,
         )
         if recovered_bbox is None:
             return None
@@ -313,9 +422,29 @@ class MaskedFeatureTracker:
             predicted_center,
         ):
             return None
+        if strict_geometry and self.bbox is not None:
+            old_area = max(float(self.bbox[2] * self.bbox[3]), 1.0)
+            recovered_area = float(recovered_bbox[2] * recovered_bbox[3])
+            area_ratio = recovered_area / old_area
+            if not 0.5 <= area_ratio <= 2.0:
+                return None
+            strict_anchor = self._anchor_from_bbox(recovered_bbox)
+            max_shift = max(
+                30.0,
+                0.40 * hypot(float(self.bbox[2]), float(self.bbox[3])),
+            )
+            if (
+                strict_anchor is None
+                or hypot(
+                    strict_anchor[0] - self.anchor[0],
+                    strict_anchor[1] - self.anchor[1],
+                )
+                > max_shift
+            ):
+                return None
 
         old_anchor = self.anchor
-        if predicted_center is not None:
+        if predicted_center is not None and not force_component_anchor:
             predicted_x = int(round(predicted_center[0]))
             predicted_y = int(round(predicted_center[1]))
             prediction_inside_mask = (
@@ -335,14 +464,9 @@ class MaskedFeatureTracker:
                     0.25 * predicted_center[1] + 0.75 * component_center[1],
                 )
         else:
-            old_x, old_y, old_w, old_h = self.bbox
-            rel_x = (old_anchor[0] - old_x) / max(float(old_w), 1.0)
-            rel_y = (old_anchor[1] - old_y) / max(float(old_h), 1.0)
-            new_x, new_y, new_w, new_h = recovered_bbox
-            recovered_anchor = (
-                new_x + rel_x * new_w,
-                new_y + rel_y * new_h,
-            )
+            recovered_anchor = self._anchor_from_bbox(recovered_bbox)
+            if recovered_anchor is None:
+                return None
 
         recovered_tracking_bbox = _translate_bbox(
             self.bbox,
@@ -356,34 +480,100 @@ class MaskedFeatureTracker:
             mask,
         )
         recovered_points = _extract_points(gray, point_mask, self.config)
-        if recovered_points is None or len(recovered_points) < 4:
-            return None
+        point_count = 0 if recovered_points is None else len(recovered_points)
 
         self.anchor = recovered_anchor
         self.bbox = recovered_tracking_bbox
-        self.prev_points = recovered_points
+        self.prev_points = (
+            None
+            if recovered_points is None
+            else recovered_points.reshape(-1, 1, 2).astype(np.float32)
+        )
         self.prev_gray = gray
 
-        point_strength = min(1.0, self.point_count / 20.0)
+        point_strength = min(1.0, point_count / 20.0)
         confidence = (
             0.75 * recovery_confidence
             + 0.25 * point_strength
         )
+        if point_count < 4:
+            confidence = min(confidence, 0.55)
         if confidence >= self.config.tracking_update_confidence and area > 0:
             self._mask_areas.append(area)
 
         return FeatureMeasurement(
-            center=self.anchor if self.point_count >= 4 else None,
+            center=self.anchor,
             bbox=self.bbox,
-            confidence=(
-                float(np.clip(confidence, 0.0, 1.0))
-                if self.point_count >= 4
-                else 0.0
-            ),
+            confidence=float(np.clip(confidence, 0.0, 1.0)),
             visibility=visibility,
-            inlier_count=self.point_count,
-            point_count=self.point_count,
+            inlier_count=point_count,
+            point_count=point_count,
+            mask_recovery=True,
         )
+
+    def _try_mask_recovery(
+        self,
+        gray: np.ndarray,
+        mask: np.ndarray | None,
+        visibility: float,
+        mask_quality: float,
+        area: float,
+        predicted_center: Point | None,
+        recovery_mode: bool,
+        strict_geometry: bool = False,
+    ) -> FeatureMeasurement | None:
+        if (
+            mask is None
+            or visibility < self.config.feature_recovery_mask_min_quality
+            or mask_quality < self.config.feature_recovery_mask_min_quality
+        ):
+            return None
+        if not recovery_mode and predicted_center is None:
+            strict_geometry = True
+        return self._recover_from_mask(
+            gray,
+            mask,
+            visibility,
+            mask_quality,
+            area,
+            predicted_center,
+            minimum_confidence=(
+                self.config.tracking_low_confidence
+                if recovery_mode
+                else self.config.tracking_recovery_confidence
+            ),
+            force_component_anchor=True,
+            strict_geometry=strict_geometry,
+        )
+
+    def _anchor_from_bbox(self, bbox: BBox | None) -> Point | None:
+        if self.anchor is None or self.bbox is None or bbox is None:
+            return None
+        old_x, old_y, old_w, old_h = self.bbox
+        rel_x = (self.anchor[0] - old_x) / max(float(old_w), 1.0)
+        rel_y = (self.anchor[1] - old_y) / max(float(old_h), 1.0)
+        new_x, new_y, new_w, new_h = bbox
+        return (
+            new_x + rel_x * new_w,
+            new_y + rel_y * new_h,
+        )
+
+    def _mask_disagrees_with_flow(
+        self,
+        flow_anchor: Point,
+        mask_anchor: Point,
+    ) -> bool:
+        if self.bbox is None:
+            return False
+        threshold = max(
+            self.config.feature_mask_consistency_min_px,
+            self.config.feature_mask_consistency_ratio
+            * hypot(float(self.bbox[2]), float(self.bbox[3])),
+        )
+        return hypot(
+            flow_anchor[0] - mask_anchor[0],
+            flow_anchor[1] - mask_anchor[1],
+        ) > threshold
 
     def _is_plausible_transform(
         self,

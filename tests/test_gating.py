@@ -1,7 +1,12 @@
 import unittest
 
+import numpy as np
+
 from stabilize.tracking.gating import CandidateGate
-from stabilize.tracking.analyzer import _apply_motion_hints
+from stabilize.tracking.analyzer import (
+    _apply_motion_hints,
+    _mask_matches_prediction,
+)
 from stabilize.tracking.models import DetectionCandidate
 
 
@@ -64,6 +69,27 @@ class CandidateGateTests(unittest.TestCase):
             source="motion",
         )
         self.assertEqual(_apply_motion_hints([], [motion]), [])
+
+    def test_recovery_gate_allows_detached_sam_component(self):
+        mask = np.zeros((240, 360), dtype=bool)
+        mask[100:140, 40:120] = True
+
+        self.assertTrue(
+            _mask_matches_prediction(
+                mask,
+                predicted_bbox=(160, 100, 80, 40),
+                predicted_center=(200.0, 120.0),
+                gate_multiplier=8.0,
+            )
+        )
+        self.assertFalse(
+            _mask_matches_prediction(
+                mask,
+                predicted_bbox=(160, 100, 80, 40),
+                predicted_center=(200.0, 120.0),
+                gate_multiplier=3.0,
+            )
+        )
 
 
 if __name__ == "__main__":

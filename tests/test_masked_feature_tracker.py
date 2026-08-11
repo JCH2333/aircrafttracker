@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -104,6 +105,72 @@ class MaskedFeatureTrackerTests(unittest.TestCase):
 
         self.assertIsNotNone(measurement.center)
         self.assertEqual(measurement.bbox[2:], initial.bbox[2:])
+
+    def test_high_quality_mask_corrects_flow_drift_before_recovery_state(self):
+        tracker = MaskedFeatureTracker(StabilizerConfig())
+        initial = tracker.initialize(self.frame, self.bbox, self.mask)
+
+        transform = np.float32([[1, 0, -50], [0, 1, 0]])
+        shifted = cv2.warpAffine(self.frame, transform, (360, 240))
+        shifted_mask = cv2.warpAffine(
+            self.mask.astype(np.uint8),
+            transform,
+            (360, 240),
+        ).astype(bool)
+
+        old_points = tracker.prev_points.reshape(-1, 1, 2)
+        bad_points = old_points + np.float32([20.0, 0.0])
+        statuses = np.ones((len(old_points), 1), dtype=np.uint8)
+        errors = np.zeros((len(old_points), 1), dtype=np.float32)
+        bad_transform = np.float32([[1, 0, 20], [0, 1, 0]])
+        inliers = np.ones((len(old_points), 1), dtype=np.uint8)
+
+        with patch(
+            "stabilize.tracking.masked_feature_tracker.cv2.calcOpticalFlowPyrLK",
+            return_value=(bad_points, statuses, errors),
+        ), patch(
+            "stabilize.tracking.masked_feature_tracker.cv2.estimateAffinePartial2D",
+            return_value=(bad_transform, inliers),
+        ):
+            measurement = tracker.update(
+                shifted,
+                shifted_mask,
+                predicted_center=initial.center,
+                recovery_mode=False,
+            )
+
+        self.assertTrue(measurement.mask_recovery)
+        self.assertAlmostEqual(
+            measurement.center[0],
+            initial.center[0] - 50,
+            delta=2.0,
+        )
+        self.assertAlmostEqual(
+            measurement.center[1],
+            initial.center[1],
+            delta=2.0,
+        )
+
+    def test_mask_recovery_can_coast_without_features(self):
+        tracker = MaskedFeatureTracker(StabilizerConfig())
+        tracker.initialize(self.frame, self.bbox, self.mask)
+        tracker.prev_points = None
+
+        with patch(
+            "stabilize.tracking.masked_feature_tracker._extract_points",
+            return_value=None,
+        ):
+            measurement = tracker.update(
+                self.frame,
+                self.mask,
+                predicted_center=tracker.anchor,
+                recovery_mode=True,
+            )
+
+        self.assertIsNotNone(measurement.center)
+        self.assertTrue(measurement.mask_recovery)
+        self.assertEqual(measurement.point_count, 0)
+        self.assertLess(measurement.confidence, 0.65)
 
 
 if __name__ == "__main__":
