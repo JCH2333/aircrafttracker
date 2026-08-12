@@ -15,6 +15,7 @@ def smooth_observations(
     smoother_window: int = 15,
     smoother_method: str = "savgol",
     smoother_polyorder: int = 2,
+    apply_post_smoother: bool = True,
 ) -> tuple[list[tuple[float, float]], list[FlaggedSegment]]:
     if not observations:
         raise ValueError("observations list is empty")
@@ -44,7 +45,10 @@ def smooth_observations(
         )
         for point in result
     ]
-    if len(clamped) >= 3 and smoother_window >= 3:
+    # Hybrid analysis already uses the zero-phase RTS smoother above. A
+    # second broad low-pass filter adds lag around rapid camera motion, so it
+    # is disabled for that backend while legacy keeps its historical filter.
+    if apply_post_smoother and len(clamped) >= 3 and smoother_window >= 3:
         clamped = smooth_trajectory(
             clamped,
             window=smoother_window,
@@ -60,10 +64,6 @@ def smooth_observations(
         ]
         for idx, observation in enumerate(observations):
             if (
-                observation.source == "sam2_mask_recovery"
-                and observation.confidence >= 0.65
-                and observation.center is not None
-            ) or (
                 observation.state == TrackingState.MANUAL_ANCHOR
                 and observation.center is not None
             ):
@@ -163,7 +163,11 @@ def _kalman_rts(
         [[1, 0, 0, 0, 0, 0], [0, 1, 0, 0, 0, 0]],
         dtype=np.float64,
     )
-    q = np.diag([0.04, 0.04, 0.15, 0.15, 0.3, 0.3])
+    base_process_noise = np.asarray(
+        [0.04, 0.04, 0.15, 0.15, 0.3, 0.3],
+        dtype=np.float64,
+    )
+    process_noise_scales = _process_noise_scales(observations)
     identity = np.eye(6, dtype=np.float64)
 
     filtered_x = np.zeros((n, 6), dtype=np.float64)
@@ -177,6 +181,7 @@ def _kalman_rts(
     for idx, obs in enumerate(observations):
         if idx > 0:
             x = f @ x
+            q = np.diag(base_process_noise * process_noise_scales[idx])
             p = f @ p @ f.T + q
         predicted_x[idx] = x
         predicted_p[idx] = p
@@ -216,6 +221,47 @@ def _kalman_rts(
         ) @ gain.T
 
     return [(float(row[0]), float(row[1])) for row in smoothed_x]
+
+
+def _process_noise_scales(
+    observations: list[TrackObservation],
+) -> np.ndarray:
+    """Allow reliable rapid motion without weakening normal jitter filtering."""
+    scales = np.ones(len(observations), dtype=np.float64)
+    for idx in range(1, len(observations)):
+        previous = observations[idx - 1]
+        current = observations[idx]
+        if (
+            not _is_trusted_observation(previous)
+            or not _is_trusted_observation(current)
+        ):
+            continue
+
+        displacement = float(np.hypot(
+            current.center[0] - previous.center[0],
+            current.center[1] - previous.center[1],
+        ))
+        bbox = current.bbox or previous.bbox
+        bbox_diagonal = (
+            float(np.hypot(bbox[2], bbox[3]))
+            if bbox is not None
+            else 0.0
+        )
+        threshold = max(8.0, 0.05 * bbox_diagonal)
+        if displacement <= threshold:
+            continue
+
+        ratio = displacement / threshold
+        scale = min(4096.0, max(16.0, 16.0 * ratio * ratio))
+        for transition_idx in range(
+            max(1, idx - 1),
+            min(len(observations), idx + 2),
+        ):
+            scales[transition_idx] = max(
+                scales[transition_idx],
+                scale,
+            )
+    return scales
 
 
 def _is_trusted_observation(observation: TrackObservation) -> bool:

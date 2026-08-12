@@ -133,10 +133,42 @@ class TrajectoryTests(unittest.TestCase):
             measured=True,
         )
 
-        centers, _ = smooth_observations(observations, 1920, 1080)
+        centers, _ = smooth_observations(
+            observations,
+            1920,
+            1080,
+            apply_post_smoother=False,
+        )
 
         self.assertAlmostEqual(centers[20][0], 500.0, delta=20.0)
         self.assertAlmostEqual(centers[21][0], 480.0, delta=20.0)
+
+    def test_hybrid_rts_does_not_double_smooth_rapid_motion(self):
+        observations = []
+        for idx in range(30):
+            center_x = 200.0 if idx < 12 else 700.0
+            observations.append(
+                TrackObservation(
+                    frame_idx=idx,
+                    center=(center_x, 400.0),
+                    bbox=None,
+                    confidence=0.95,
+                    visibility=1.0,
+                    state=TrackingState.TRACKING,
+                    source="sam2_lk",
+                    measured=True,
+                )
+            )
+
+        centers, _ = smooth_observations(
+            observations,
+            1920,
+            1080,
+            apply_post_smoother=False,
+        )
+
+        self.assertGreater(centers[12][0], 650.0)
+        self.assertGreater(centers[13][0], 680.0)
 
 
 if __name__ == "__main__":

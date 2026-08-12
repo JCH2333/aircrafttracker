@@ -196,6 +196,7 @@ class StabilizationPipeline:
             smoother_window=self.config.smoother_window,
             smoother_method=self.config.smoother_method,
             smoother_polyorder=self.config.smoother_polyorder,
+            apply_post_smoother=result.backend == "legacy",
         )
 
         if self.config.review and segments:
@@ -233,6 +234,7 @@ class StabilizationPipeline:
                     smoother_window=self.config.smoother_window,
                     smoother_method=self.config.smoother_method,
                     smoother_polyorder=self.config.smoother_polyorder,
+                    apply_post_smoother=result.backend == "legacy",
                 )
 
         self.observations = result.observations
