@@ -101,6 +101,13 @@ class StabilizerConfig:
     sam2_model_id: str = "facebook/sam2.1-hiera-base-plus"
     sam2_offload_video_to_cpu: bool = True
     sam2_offload_state_to_cpu: bool = True
+    # Keep SAM 2 video-state memory bounded on long clips. Each window is
+    # initialized independently, with overlap used to carry the aircraft id.
+    sam2_segment_frames: int = 120
+    sam2_segment_overlap: int = 24
+    # The upstream async loader retains a background thread and every decoded
+    # tensor. Synchronous loading is more predictable for long batch runs.
+    sam2_async_loading_frames: bool = False
     hybrid_fallback_to_legacy: bool = True
 
     # Review and persistent manual anchors

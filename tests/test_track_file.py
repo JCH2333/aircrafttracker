@@ -20,12 +20,19 @@ class TrackFileTests(unittest.TestCase):
                     FlaggedSegment(90, 110, "occluded", 21)
                 ],
             )
-            track_file.add_anchor(ManualAnchor(100, (11, 22, 33, 44)))
+            track_file.add_anchor(
+                ManualAnchor(
+                    100,
+                    (11, 22, 33, 44),
+                    reference_point=(17.5, 29.5),
+                )
+            )
             track_file.save(path)
 
             loaded = TrackFile.load(path)
             self.assertEqual(len(loaded.anchors), 1)
             self.assertEqual(loaded.anchors[0].bbox, (11, 22, 33, 44))
+            self.assertEqual(loaded.anchors[0].reference_point, (17.5, 29.5))
             self.assertEqual(loaded.flagged_segments[0].length, 21)
             self.assertTrue(
                 loaded.is_compatible(

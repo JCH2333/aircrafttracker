@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -142,13 +144,128 @@ class AnalysisFrameCache:
             return None
         return (point[0] / self.scale_x, point[1] / self.scale_y)
 
+    def to_analysis_point(
+        self,
+        point: tuple[float, float] | None,
+    ) -> tuple[float, float] | None:
+        if point is None:
+            return None
+        return (point[0] * self.scale_x, point[1] * self.scale_y)
+
     def close(self) -> None:
         if self._temp_dir is not None:
             self._temp_dir.cleanup()
             self._temp_dir = None
             self.path = None
 
+    def window(
+        self,
+        start_frame: int,
+        end_frame: int,
+    ) -> "AnalysisFrameWindow":
+        """Create a contiguous temporary view of a cached frame interval.
+
+        SAM 2 accepts a directory of sequentially named JPEG frames. Long
+        videos are therefore analyzed through bounded windows while retaining
+        one root cache, rather than decoding the original 6K clip again for
+        every window. The window uses NTFS hard links when available and falls
+        back to copies on filesystems that do not support links.
+        """
+        return AnalysisFrameWindow(self, start_frame, end_frame)
+
     def __enter__(self) -> "AnalysisFrameCache":
+        return self
+
+    def __exit__(self, *args) -> None:
+        self.close()
+
+
+class AnalysisFrameWindow:
+    """A short, sequentially named view into an ``AnalysisFrameCache``."""
+
+    def __init__(
+        self,
+        parent: AnalysisFrameCache,
+        start_frame: int,
+        end_frame: int,
+    ):
+        if parent.path is None or parent.total_frames <= 0:
+            raise RuntimeError("Analysis cache has not been built")
+        self.parent = parent
+        self.start_frame = max(0, int(start_frame))
+        self.end_frame = min(int(end_frame), parent.total_frames - 1)
+        if self.end_frame < self.start_frame:
+            raise ValueError("Analysis window end precedes its start")
+
+        self._temp_dir: tempfile.TemporaryDirectory | None = None
+        self.path: Path | None = None
+        self.source_width = parent.source_width
+        self.source_height = parent.source_height
+        self.source_total_frames = parent.source_total_frames
+        self.frame_offset = parent.frame_offset + self.start_frame
+        self.width = parent.width
+        self.height = parent.height
+        self.frame_rate = parent.frame_rate
+        self.total_frames = self.end_frame - self.start_frame + 1
+        self.scale_x = parent.scale_x
+        self.scale_y = parent.scale_y
+
+    def build(self) -> "AnalysisFrameWindow":
+        self._temp_dir = tempfile.TemporaryDirectory(
+            prefix="aircraft_tracker_window_"
+        )
+        self.path = Path(self._temp_dir.name)
+        assert self.parent.path is not None
+        for local_idx, parent_idx in enumerate(
+            range(self.start_frame, self.end_frame + 1)
+        ):
+            source = self.parent.path / f"{parent_idx:06d}.jpg"
+            target = self.path / f"{local_idx:06d}.jpg"
+            try:
+                os.link(source, target)
+            except OSError:
+                shutil.copy2(source, target)
+        return self
+
+    def read(self, frame_idx: int):
+        if self.path is None:
+            raise RuntimeError("Analysis window has not been built")
+        frame = cv2.imread(str(self.path / f"{frame_idx:06d}.jpg"))
+        if frame is None:
+            raise IndexError(f"Analysis frame {frame_idx} not found")
+        return frame
+
+    def to_analysis_bbox(
+        self,
+        bbox: tuple[int, int, int, int],
+    ) -> tuple[int, int, int, int]:
+        return self.parent.to_analysis_bbox(bbox)
+
+    def to_source_bbox(
+        self,
+        bbox: tuple[int, int, int, int] | None,
+    ) -> tuple[int, int, int, int] | None:
+        return self.parent.to_source_bbox(bbox)
+
+    def to_source_point(
+        self,
+        point: tuple[float, float] | None,
+    ) -> tuple[float, float] | None:
+        return self.parent.to_source_point(point)
+
+    def to_analysis_point(
+        self,
+        point: tuple[float, float] | None,
+    ) -> tuple[float, float] | None:
+        return self.parent.to_analysis_point(point)
+
+    def close(self) -> None:
+        if self._temp_dir is not None:
+            self._temp_dir.cleanup()
+            self._temp_dir = None
+            self.path = None
+
+    def __enter__(self) -> "AnalysisFrameWindow":
         return self
 
     def __exit__(self, *args) -> None:

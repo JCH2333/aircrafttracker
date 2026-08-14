@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -210,6 +211,7 @@ def analyze_hybrid(
     debug_viz_path: Path | None = None,
     frame_range: tuple[int, int] | None = None,
 ) -> AnalysisResult:
+    """Run hybrid analysis with bounded SAM 2 video states."""
     start_frame = frame_range[0] if frame_range else 0
     end_frame = frame_range[1] if frame_range else None
     with AnalysisFrameCache(
@@ -223,7 +225,7 @@ def analyze_hybrid(
             progress_cb=(
                 lambda current, total: progress_cb(
                     int(current * 0.25),
-                    total,
+                    cache.total_frames or total,
                 )
                 if progress_cb
                 else None
@@ -232,11 +234,85 @@ def analyze_hybrid(
         if cache.total_frames == 0:
             raise RuntimeError("Input video contains no frames")
 
+        windows = _segment_windows(
+            cache.total_frames,
+            config.sam2_segment_frames,
+            config.sam2_segment_overlap,
+        )
+        if len(windows) == 1:
+            return _analyze_hybrid_window(
+                config,
+                detector,
+                anchors,
+                progress_cb=progress_cb,
+                debug_viz_path=debug_viz_path,
+                cache=cache,
+            )
+
+        logger.info(
+            "Hybrid tracking in %d SAM 2 window(s): %d frames with %d overlap",
+            len(windows),
+            max(1, config.sam2_segment_frames),
+            max(0, config.sam2_segment_overlap),
+        )
+        result = _analyze_hybrid_segmented(
+            cache,
+            config,
+            detector,
+            anchors,
+            windows,
+            progress_cb=progress_cb,
+        )
+        if debug_viz_path is not None:
+            _write_hybrid_debug(cache, result.observations, debug_viz_path)
+        return result
+
+
+def _analyze_hybrid_window(
+    config: StabilizerConfig,
+    detector,
+    anchors: list[ManualAnchor],
+    progress_cb=None,
+    debug_viz_path: Path | None = None,
+    frame_range: tuple[int, int] | None = None,
+    cache=None,
+    provider: Sam2MaskProvider | None = None,
+    continuation_start: int = 0,
+) -> AnalysisResult:
+    start_frame = frame_range[0] if frame_range else 0
+    end_frame = frame_range[1] if frame_range else None
+    cache_context = (
+        nullcontext(cache)
+        if cache is not None
+        else AnalysisFrameCache(
+            config.input_path,
+            max_dimension=config.analysis_downscale,
+            jpeg_quality=config.analysis_jpeg_quality,
+            start_frame=start_frame,
+            end_frame=end_frame,
+        )
+    )
+    with cache_context as cache:
+        if cache.path is None:
+            cache.build(
+                progress_cb=(
+                    lambda current, total: progress_cb(
+                        int(current * 0.25),
+                        total,
+                    )
+                    if progress_cb
+                    else None
+                )
+            )
+        if cache.total_frames == 0:
+            raise RuntimeError("Input video contains no frames")
+
         local_anchors = [
             ManualAnchor(
                 frame_idx=anchor.frame_idx - cache.frame_offset,
                 bbox=anchor.bbox,
                 source=anchor.source,
+                reference_point=anchor.reference_point,
             )
             for anchor in anchors
             if (
@@ -250,13 +326,17 @@ def analyze_hybrid(
             detector,
             local_anchors,
             config,
+            continuation_start=continuation_start,
         )
-        provider = Sam2MaskProvider(
-            model_id=config.sam2_model_id,
-            device=config.device,
-            offload_video_to_cpu=config.sam2_offload_video_to_cpu,
-            offload_state_to_cpu=config.sam2_offload_state_to_cpu,
-        )
+        owns_provider = provider is None
+        if provider is None:
+            provider = Sam2MaskProvider(
+                model_id=config.sam2_model_id,
+                device=config.device,
+                offload_video_to_cpu=config.sam2_offload_video_to_cpu,
+                offload_state_to_cpu=config.sam2_offload_state_to_cpu,
+                async_loading_frames=config.sam2_async_loading_frames,
+            )
 
         feature_tracker = MaskedFeatureTracker(config)
         state = _make_state_machine(config)
@@ -265,6 +345,7 @@ def analyze_hybrid(
                 frame_idx=anchor.frame_idx,
                 bbox=cache.to_analysis_bbox(anchor.bbox),
                 source=anchor.source,
+                reference_point=cache.to_analysis_point(anchor.reference_point),
             )
             for anchor in local_anchors
         }
@@ -334,6 +415,7 @@ def analyze_hybrid(
                         frame_bgr,
                         manual_anchor.bbox,
                         valid_mask,
+                        anchor=manual_anchor.reference_point,
                     )
                     observation = state.update(
                         frame_idx=source_idx,
@@ -476,6 +558,8 @@ def analyze_hybrid(
         finally:
             if debug_writer is not None:
                 debug_writer.close()
+            if owns_provider:
+                provider.close()
 
         return AnalysisResult(
             observations=[obs for obs in observations if obs is not None],
@@ -487,11 +571,254 @@ def analyze_hybrid(
         )
 
 
+def _segment_windows(
+    total_frames: int,
+    segment_frames: int,
+    overlap: int,
+) -> list[tuple[int, int]]:
+    """Return inclusive windows with a bounded positive stride."""
+    if total_frames <= 0:
+        return []
+    size = max(1, int(segment_frames))
+    overlap = max(0, min(int(overlap), size - 1))
+    stride = max(1, size - overlap)
+    windows: list[tuple[int, int]] = []
+    start = 0
+    while start < total_frames:
+        end = min(total_frames - 1, start + size - 1)
+        windows.append((start, end))
+        if end >= total_frames - 1:
+            break
+        start += stride
+    return windows
+
+
+def _analyze_hybrid_segmented(
+    cache: AnalysisFrameCache,
+    config: StabilizerConfig,
+    detector,
+    anchors: list[ManualAnchor],
+    windows: list[tuple[int, int]],
+    progress_cb=None,
+) -> AnalysisResult:
+    """Analyze long clips in bounded SAM 2 windows and merge global frames."""
+    observations: list[TrackObservation | None] = [None] * cache.total_frames
+    review_masks: dict[int, np.ndarray] = {}
+    provider = Sam2MaskProvider(
+        model_id=config.sam2_model_id,
+        device=config.device,
+        offload_video_to_cpu=config.sam2_offload_video_to_cpu,
+        offload_state_to_cpu=config.sam2_offload_state_to_cpu,
+        async_loading_frames=config.sam2_async_loading_frames,
+    )
+
+    try:
+        for window_index, (start, end) in enumerate(windows):
+            previous_end = windows[window_index - 1][1] if window_index else -1
+            overlap_end = min(previous_end, end)
+            analysis_start = start
+            boundary = None
+            if window_index:
+                boundary = _find_boundary_anchor(
+                    observations,
+                    start,
+                    overlap_end,
+                    lookback_start=max(
+                        0,
+                        start - max(1, config.sam2_segment_frames),
+                    ),
+                    frame_width=cache.source_width,
+                    frame_height=cache.source_height,
+                )
+                if boundary is not None:
+                    analysis_start = min(
+                        start,
+                        boundary.frame_idx - cache.frame_offset,
+                    )
+
+            source_start = cache.frame_offset + analysis_start
+            source_end = cache.frame_offset + end
+            window_anchors = [
+                anchor
+                for anchor in anchors
+                if source_start <= anchor.frame_idx <= source_end
+            ]
+            if boundary is not None:
+                window_anchors.append(boundary)
+
+            with cache.window(analysis_start, end) as window_cache:
+                window_cache.build()
+                window_progress = None
+                if progress_cb is not None:
+                    window_progress = lambda current, total, base=start: progress_cb(
+                        min(cache.total_frames, base + current),
+                        cache.total_frames,
+                    )
+                partial = _analyze_hybrid_window(
+                    config,
+                    detector,
+                    window_anchors,
+                    progress_cb=window_progress,
+                    cache=window_cache,
+                    provider=provider,
+                    continuation_start=start - analysis_start,
+                )
+
+            discard_before = start if window_index == 0 else overlap_end + 1
+            for observation in partial.observations:
+                local_idx = observation.frame_idx - cache.frame_offset
+                if local_idx < 0 or local_idx >= cache.total_frames:
+                    continue
+                if local_idx < discard_before and observations[local_idx] is not None:
+                    continue
+                observations[local_idx] = observation
+            for frame_idx, mask in partial.review_masks.items():
+                local_idx = frame_idx - cache.frame_offset
+                if local_idx >= discard_before or frame_idx not in review_masks:
+                    review_masks[frame_idx] = mask
+
+            if progress_cb is not None:
+                progress_cb(min(cache.total_frames, end + 1), cache.total_frames)
+    finally:
+        provider.close()
+
+    missing = [idx for idx, observation in enumerate(observations) if observation is None]
+    if missing:
+        raise RuntimeError(
+            "Segmented hybrid analysis did not produce observations for frames "
+            f"{missing[:5]}"
+        )
+    return AnalysisResult(
+        observations=[observation for observation in observations if observation is not None],
+        width=cache.source_width,
+        height=cache.source_height,
+        frame_rate=cache.frame_rate,
+        backend="hybrid",
+        review_masks=review_masks,
+    )
+
+
+def _find_boundary_anchor(
+    observations: list[TrackObservation | None],
+    start: int,
+    end: int,
+    lookback_start: int | None = None,
+    frame_width: int | None = None,
+    frame_height: int | None = None,
+) -> ManualAnchor | None:
+    if end < start:
+        return None
+    # Prefer the beginning of the overlap so the new SAM 2 state and LK
+    # tracker replay several frames before reaching new output. When the
+    # aircraft is already clipped or hidden throughout the overlap, fall back
+    # to the nearest earlier complete observation and expand only this window.
+    search_indices = list(range(start, end + 1))
+    if lookback_start is not None:
+        bounded_start = max(0, min(int(lookback_start), start))
+        search_indices.extend(range(start - 1, bounded_start - 1, -1))
+
+    for local_idx in search_indices:
+        observation = observations[local_idx]
+        if not _is_boundary_observation(
+            observation,
+            frame_width=frame_width,
+            frame_height=frame_height,
+        ):
+            continue
+        assert observation is not None and observation.bbox is not None
+        return ManualAnchor(
+            frame_idx=observation.frame_idx,
+            bbox=observation.bbox,
+            source="boundary",
+            reference_point=observation.center,
+        )
+    return None
+
+
+def _is_boundary_observation(
+    observation: TrackObservation | None,
+    frame_width: int | None = None,
+    frame_height: int | None = None,
+) -> bool:
+    if not (
+        observation is not None
+        and observation.center is not None
+        and observation.bbox is not None
+        and observation.confidence >= 0.65
+        and observation.measured
+        and observation.state
+        in (TrackingState.TRACKING, TrackingState.MANUAL_ANCHOR)
+    ):
+        return False
+
+    if frame_width is None or frame_height is None:
+        return True
+
+    center_x, center_y = observation.center
+    x, y, width, height = observation.bbox
+    return bool(
+        0.0 <= center_x < frame_width
+        and 0.0 <= center_y < frame_height
+        and x > 0
+        and y > 0
+        and x + width < frame_width
+        and y + height < frame_height
+    )
+
+
+def _write_hybrid_debug(
+    cache: AnalysisFrameCache,
+    observations: list[TrackObservation],
+    output_path: Path,
+) -> None:
+    """Render a single ordered debug video after segmented analysis."""
+    writer = DebugVizWriter(
+        output_path=output_path,
+        frame_rate=cache.frame_rate,
+        width=cache.width,
+        height=cache.height,
+    )
+    try:
+        for observation in observations:
+            local_idx = observation.frame_idx - cache.frame_offset
+            frame_bgr = cache.read(local_idx)
+            bbox = observation.bbox
+            if bbox is not None:
+                bbox = cache.to_analysis_bbox(bbox)
+            centroid = cache.to_analysis_point(observation.center)
+            predicted = cache.to_analysis_point(observation.predicted_center)
+            writer.write(
+                frame_bgr,
+                observation.frame_idx,
+                _debug_state(
+                    TrackObservation(
+                        frame_idx=observation.frame_idx,
+                        center=centroid,
+                        bbox=bbox,
+                        confidence=observation.confidence,
+                        visibility=observation.visibility,
+                        state=observation.state,
+                        source=observation.source,
+                        predicted_center=predicted,
+                        measured=observation.measured,
+                        rejected_candidates=observation.rejected_candidates,
+                    ),
+                    velocity=(0.0, 0.0),
+                    detection_used=observation.source in {
+                        "manual", "boundary", "sam2_init",
+                    },
+                ),
+            )
+    finally:
+        writer.close()
+
+
 def _build_sam_prompts(
     cache: AnalysisFrameCache,
     detector,
     anchors: list[ManualAnchor],
     config: StabilizerConfig,
+    continuation_start: int = 0,
 ) -> list[Sam2Prompt]:
     prompts = [
         Sam2Prompt(
@@ -504,8 +831,35 @@ def _build_sam_prompts(
         if 0 <= anchor.frame_idx < cache.total_frames
     ]
 
-    has_early_manual = any(prompt.frame_idx <= 5 for prompt in prompts)
-    if not has_early_manual:
+    has_early_prompt = any(prompt.frame_idx <= 5 for prompt in prompts)
+    # A continuation window receives a reliable box from the preceding
+    # overlap. Do not add an unrelated detector prompt before it: SAM 2 would
+    # otherwise be conditioned on two potentially different objects.
+    has_boundary_prompt = any(
+        prompt.source == "boundary" for prompt in prompts
+    )
+    has_later_prompt = any(
+        prompt.frame_idx >= continuation_start
+        and prompt.source != "boundary"
+        for prompt in prompts
+    )
+    boundary_before_continuation = any(
+        prompt.source == "boundary"
+        and prompt.frame_idx < continuation_start
+        for prompt in prompts
+    )
+    if boundary_before_continuation and not has_later_prompt:
+        recovery_prompt = _find_recovery_prompt(
+            cache,
+            detector,
+            prompts,
+            config,
+            start_frame=continuation_start,
+        )
+        if recovery_prompt is not None:
+            prompts.append(recovery_prompt)
+
+    if not has_early_prompt and not has_boundary_prompt:
         gate = CandidateGate()
         motion_detector = MotionFallbackDetector(config)
         scan_limit = min(cache.total_frames, 91)
@@ -538,6 +892,49 @@ def _build_sam_prompts(
 
     prompts.sort(key=lambda prompt: prompt.frame_idx)
     return prompts
+
+
+def _find_recovery_prompt(
+    cache: AnalysisFrameCache,
+    detector,
+    existing_prompts: list[Sam2Prompt],
+    config: StabilizerConfig,
+    start_frame: int,
+) -> Sam2Prompt | None:
+    """Find the aircraft again after a continuation window starts occluded."""
+    gate = CandidateGate()
+    for prompt in existing_prompts:
+        gate.record_bbox(prompt.bbox)
+
+    motion_detector = MotionFallbackDetector(config)
+    step = max(1, config.detection_interval // 2)
+    for frame_idx in range(
+        max(0, int(start_frame)),
+        cache.total_frames,
+        step,
+    ):
+        frame_bgr = cache.read(frame_idx)
+        motion_hints = motion_detector.detect_candidates(frame_bgr)
+        candidate, _ = gate.select(
+            _apply_motion_hints(
+                detector.detect_candidates(frame_bgr),
+                motion_hints,
+            ),
+            frame_shape=frame_bgr.shape[:2],
+        )
+        if candidate is None:
+            continue
+        logger.info(
+            "Adding SAM 2 recovery prompt at source frame %d",
+            cache.frame_offset + frame_idx,
+        )
+        return Sam2Prompt(
+            frame_idx=frame_idx,
+            bbox=candidate.bbox,
+            source="auto",
+            score=candidate.score,
+        )
+    return None
 
 
 def _make_state_machine(config: StabilizerConfig) -> TrackingStateMachine:

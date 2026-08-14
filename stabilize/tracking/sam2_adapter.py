@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,11 +37,13 @@ class Sam2MaskProvider:
         device: str = "cuda",
         offload_video_to_cpu: bool = True,
         offload_state_to_cpu: bool = True,
+        async_loading_frames: bool = False,
     ):
         self.model_id = model_id
         self.device = device
         self.offload_video_to_cpu = offload_video_to_cpu
         self.offload_state_to_cpu = offload_state_to_cpu
+        self.async_loading_frames = async_loading_frames
         self._predictor = None
 
     @staticmethod
@@ -86,35 +89,69 @@ class Sam2MaskProvider:
 
         if earliest > 0:
             reverse_state = self._create_state(frame_dir)
-            self._add_prompts(reverse_state, prompts)
-            reverse_masks = {}
-            for frame_idx, _, logits in self._predictor.propagate_in_video(
-                reverse_state,
-                start_frame_idx=earliest,
-                max_frame_num_to_track=earliest + 1,
-                reverse=True,
-            ):
-                if frame_idx != earliest:
-                    reverse_masks[frame_idx] = self._convert_mask(frame_idx, logits)
-            for frame_idx in sorted(reverse_masks):
-                yield reverse_masks[frame_idx]
+            try:
+                self._add_prompts(reverse_state, prompts)
+                reverse_masks = {}
+                for frame_idx, _, logits in self._predictor.propagate_in_video(
+                    reverse_state,
+                    start_frame_idx=earliest,
+                    max_frame_num_to_track=earliest + 1,
+                    reverse=True,
+                ):
+                    if frame_idx != earliest:
+                        reverse_masks[frame_idx] = self._convert_mask(
+                            frame_idx,
+                            logits,
+                        )
+                for frame_idx in sorted(reverse_masks):
+                    yield reverse_masks[frame_idx]
+            finally:
+                self._release_state(reverse_state)
 
         state = self._create_state(frame_dir)
-        self._add_prompts(state, prompts)
-        for frame_idx, _, logits in self._predictor.propagate_in_video(
-            state,
-            start_frame_idx=earliest,
-            reverse=False,
-        ):
-            yield self._convert_mask(frame_idx, logits)
+        try:
+            self._add_prompts(state, prompts)
+            for frame_idx, _, logits in self._predictor.propagate_in_video(
+                state,
+                start_frame_idx=earliest,
+                reverse=False,
+            ):
+                yield self._convert_mask(frame_idx, logits)
+        finally:
+            self._release_state(state)
 
     def _create_state(self, frame_dir: Path | str):
         return self._predictor.init_state(
             video_path=str(frame_dir),
             offload_video_to_cpu=self.offload_video_to_cpu,
             offload_state_to_cpu=self.offload_state_to_cpu,
-            async_loading_frames=True,
+            async_loading_frames=self.async_loading_frames,
         )
+
+    def _release_state(self, state) -> None:
+        if state is None:
+            return
+        try:
+            if self._predictor is not None:
+                self._predictor.reset_state(state)
+        except Exception:
+            # Releasing one failed state must not obscure the original tracker
+            # failure. Dropping its references still lets Python reclaim it.
+            pass
+        if isinstance(state, dict):
+            state.clear()
+
+    def close(self) -> None:
+        """Release the predictor and CUDA allocator cache after a window."""
+        self._predictor = None
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
 
     def _add_prompts(self, state, prompts: list[Sam2Prompt]) -> None:
         for prompt in prompts:

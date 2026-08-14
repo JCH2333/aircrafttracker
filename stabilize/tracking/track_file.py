@@ -6,7 +6,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from stabilize.tracking.models import BBox, FlaggedSegment
+from stabilize.tracking.models import BBox, FlaggedSegment, Point
 
 
 @dataclass(order=True)
@@ -14,6 +14,7 @@ class ManualAnchor:
     frame_idx: int
     bbox: BBox
     source: str = "manual"
+    reference_point: Point | None = None
 
 
 @dataclass
@@ -46,6 +47,11 @@ class TrackFile:
                     frame_idx=int(item["frame_idx"]),
                     bbox=tuple(int(value) for value in item["bbox"]),
                     source=str(item.get("source", "manual")),
+                    reference_point=(
+                        tuple(float(value) for value in item["reference_point"])
+                        if item.get("reference_point") is not None
+                        else None
+                    ),
                 )
                 for item in data.get("anchors", [])
             ],

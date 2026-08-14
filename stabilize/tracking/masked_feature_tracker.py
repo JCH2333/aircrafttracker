@@ -64,12 +64,19 @@ class MaskedFeatureTracker:
         frame_bgr: np.ndarray,
         bbox: BBox,
         mask: np.ndarray | None = None,
+        anchor: Point | None = None,
     ) -> FeatureMeasurement:
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         self.prev_gray = gray
         self.bbox = _clip_bbox(bbox, gray.shape)
         x, y, w, h = self.bbox
-        self.anchor = (x + w / 2.0, y + h / 2.0)
+        if anchor is None:
+            self.anchor = (x + w / 2.0, y + h / 2.0)
+        else:
+            self.anchor = (
+                float(np.clip(anchor[0], 0.0, gray.shape[1] - 1.0)),
+                float(np.clip(anchor[1], 0.0, gray.shape[0] - 1.0)),
+            )
         point_mask = _build_point_mask(gray.shape, self.bbox, mask)
         self.prev_points = _extract_points(gray, point_mask, self.config)
 

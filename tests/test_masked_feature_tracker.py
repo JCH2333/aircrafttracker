@@ -42,6 +42,30 @@ class MaskedFeatureTrackerTests(unittest.TestCase):
         )
         self.assertGreaterEqual(measurement.inlier_count, 4)
 
+    def test_preserves_explicit_reference_point_through_translation(self):
+        tracker = MaskedFeatureTracker(StabilizerConfig())
+        reference = (150.0, 105.0)
+        initial = tracker.initialize(
+            self.frame,
+            self.bbox,
+            self.mask,
+            anchor=reference,
+        )
+
+        transform = np.float32([[1, 0, 6], [0, 1, 4]])
+        shifted = cv2.warpAffine(self.frame, transform, (360, 240))
+        shifted_mask = cv2.warpAffine(
+            self.mask.astype(np.uint8),
+            transform,
+            (360, 240),
+        ).astype(bool)
+        measurement = tracker.update(shifted, shifted_mask)
+
+        self.assertEqual(initial.center, reference)
+        self.assertIsNotNone(measurement.center)
+        self.assertAlmostEqual(measurement.center[0], reference[0] + 6, delta=1.0)
+        self.assertAlmostEqual(measurement.center[1], reference[1] + 4, delta=1.0)
+
     def test_rejects_fully_occluded_points(self):
         tracker = MaskedFeatureTracker(StabilizerConfig())
         tracker.initialize(self.frame, self.bbox, self.mask)
